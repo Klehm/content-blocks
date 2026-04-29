@@ -1,0 +1,39 @@
+{
+    "name": "@klehm/content-blocks",
+    "description": "Modular page builder for Symfony.",
+    "license": "MIT",
+    "symfony": {
+        "controllers": {
+            "cb-builder-launcher": {
+                "main": "controllers/cb-builder-launcher_controller.js",
+                "name": "cb-builder-launcher",
+                "fetch": "eager",
+                "enabled": true
+            },
+            "cb-builder": {
+                "main": "controllers/cb-builder_controller.js",
+                "name": "cb-builder",
+                "fetch": "eager",
+                "enabled": true
+            },
+            "cb-block-edit-keys": {
+                "main": "controllers/cb-block-edit-keys_controller.js",
+                "name": "cb-block-edit-keys",
+                "fetch": "eager",
+                "enabled": true
+            },
+            "cb-section-settings-form": {
+                "main": "controllers/cb-section-settings-form_controller.js",
+                "name": "cb-section-settings-form",
+                "fetch": "eager",
+                "enabled": true
+            }
+        },
+        "importmap": {
+            "@hotwired/stimulus": "^3.0.0"
+        }
+    },
+    "peerDependencies": {
+        "@hotwired/stimulus": "^3.0.0"
+    }
+}

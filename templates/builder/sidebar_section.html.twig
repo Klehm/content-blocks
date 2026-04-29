@@ -1,0 +1,22 @@
+{# @var form Symfony\Component\Form\FormView #}
+{# @var sectionId int #}
+<div class="cb-sidebar__section-settings"
+     data-controller="cb-section-settings-form"
+     data-cb-section-settings-form-section-id-value="{{ sectionId }}">
+
+    <h3 class="cb-sidebar__title">{{ 'cb.section.settings.title'|trans({}, 'content_blocks') }}</h3>
+
+    {{ form_start(form, { 'attr': { 'data-cb-section-settings-form-target': 'form' } }) }}
+        {{ form_widget(form) }}
+
+        {# Hidden submit button kept so the form can still be triggered the
+           normal way (Enter key, or the cb-section-settings-form#_onSubmit
+           pathway). The visible Save lives in the sidebar header and clicks
+           this one via data-cb-sidebar-save. #}
+        <button type="submit"
+                data-cb-sidebar-save
+                class="visually-hidden cb-sidebar__action-fallback">
+            {{ 'cb.block.save'|trans({}, 'content_blocks') }}
+        </button>
+    {{ form_end(form) }}
+</div>
