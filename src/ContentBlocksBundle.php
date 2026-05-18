@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace ContentBlocks;
 
+use ContentBlocks\Block\BlockDecoratorInterface;
 use ContentBlocks\BlockType\AsContentBlock;
 use ContentBlocks\DependencyInjection\BlockTypeCompilerPass;
 use ContentBlocks\Section\SectionDecoratorInterface;
@@ -32,12 +33,10 @@ final class ContentBlocksBundle extends AbstractBundle
             ],
         ]);
 
-        // Expose templates under the @ContentBlocks Twig namespace and auto-register
-        // the form theme so `form_row(form.contentArea)` renders the builder out of the box.
+        // Auto-register the form theme so `form_row(form.contentArea)` renders the builder out of the box.
+        // The @ContentBlocks namespace itself is auto-detected by AbstractBundle from <BundleRoot>/templates/,
+        // which also gives `templates/bundles/ContentBlocksBundle/` priority for host overrides.
         $builder->prependExtensionConfig('twig', [
-            'paths' => [
-                $this->getPath() . '/templates' => 'ContentBlocks',
-            ],
             'form_themes' => [
                 '@ContentBlocks/form/content_area_widget.html.twig',
             ],
@@ -75,6 +74,8 @@ final class ContentBlocksBundle extends AbstractBundle
             ->addTag('content_blocks.section_decorator');
         $container->registerForAutoconfiguration(SectionSettingsDefaultsProviderInterface::class)
             ->addTag('content_blocks.section_settings_defaults');
+        $container->registerForAutoconfiguration(BlockDecoratorInterface::class)
+            ->addTag('content_blocks.block_decorator');
     }
 
     public function getPath(): string
