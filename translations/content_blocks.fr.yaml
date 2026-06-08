@@ -51,6 +51,14 @@ cb:
         cancel: "Annuler"
         remove: "Supprimer"
         duplicate: "Dupliquer"
+        tab:
+            general: "Général"
+            style: "Style"
+            has_errors: "Ce groupe contient des erreurs"
+    collection:
+        reorder: "Glisser pour réordonner"
+        move_up: "Monter"
+        move_down: "Descendre"
     builder:
         open: "Modifier le contenu"
         close: "Fermer"
