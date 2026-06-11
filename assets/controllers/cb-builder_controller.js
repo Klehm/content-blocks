@@ -25,6 +25,9 @@ export default class extends Controller {
         'sidebarToggle',
         'progress',
         'savedFlash',
+        'saveError',
+        'undoBar',
+        'undoLabel',
         'replacePicker',
         'replacePickerSearch',
         'replacePickerList',
@@ -58,6 +61,12 @@ export default class extends Controller {
     static SAVE_RELOAD_DEBOUNCE_MS = 500;
     static MOBILE_BREAKPOINT = '(max-width: 768px)';
     /**
+     * How long the "deleted — Undo" snackbar stays actionable. Deletes are
+     * immediate (no confirm dialog), so this window is the editor's only
+     * one-click recovery short of discarding the whole draft.
+     */
+    static UNDO_TIMEOUT_MS = 6000;
+    /**
      * Minimum shell width (in px) for each emulated viewport. The "desktop"
      * viewport always fits because it tracks the shell's actual width. A
      * tablet/mobile button is hidden when the shell is narrower than its
@@ -73,6 +82,8 @@ export default class extends Controller {
         this._onResizeMove = this._onResizeMove.bind(this);
         this._onResizeEnd = this._onResizeEnd.bind(this);
         this._onWindowResize = this._onWindowResize.bind(this);
+        this._onLiveConnect = this._onLiveConnect.bind(this);
+        this._onSaveError = this._onSaveError.bind(this);
 
         window.addEventListener('message', this._onMessage);
         window.addEventListener('resize', this._onWindowResize);
@@ -80,6 +91,13 @@ export default class extends Controller {
         // dispatchBrowserEvent on save; the events bubble up to here.
         this.element.addEventListener('cb:block:saved', this._onBlockSaved);
         this.element.addEventListener('cb:section:saved', this._onSectionSaved);
+        // Save-failure feedback: live:connect bubbles up from every Live
+        // Component mounted in the sidebar (block edit forms) — we hook each
+        // component's error paths there. cb:save:error bubbles up from the
+        // section-settings form (its own fetch) and from the live error
+        // hooks below; both end in the persistent topbar error banner.
+        this.element.addEventListener('live:connect', this._onLiveConnect);
+        this.element.addEventListener('cb:save:error', this._onSaveError);
 
         this._restoreSidebarWidth();
         this._restoreSidebarCollapsed();
@@ -100,9 +118,12 @@ export default class extends Controller {
         window.removeEventListener('resize', this._onWindowResize);
         this.element.removeEventListener('cb:block:saved', this._onBlockSaved);
         this.element.removeEventListener('cb:section:saved', this._onSectionSaved);
+        this.element.removeEventListener('live:connect', this._onLiveConnect);
+        this.element.removeEventListener('cb:save:error', this._onSaveError);
         document.removeEventListener('mousemove', this._onResizeMove);
         document.removeEventListener('mouseup', this._onResizeEnd);
         clearTimeout(this._reloadTimer);
+        clearTimeout(this._undoTimer);
     }
 
     _onWindowResize() {
@@ -242,6 +263,9 @@ export default class extends Controller {
         if (event) event.preventDefault();
         const result = await this._jsonRequest('POST', `/_content-blocks/area/${this.areaIdValue}/publish`);
         if (result === null) return;
+        // Publish physically removed soft-deleted rows — a pending undo
+        // offer can no longer be honoured.
+        this._hideUndo();
         this._applyDraftState(result.hasUnpublishedChanges);
         this.reload();
     }
@@ -250,6 +274,9 @@ export default class extends Controller {
         if (event) event.preventDefault();
         const result = await this._jsonRequest('POST', `/_content-blocks/area/${this.areaIdValue}/discard`);
         if (result === null) return;
+        // Discard already reverted every draft deletion (or removed
+        // never-published rows) — the undo offer is moot either way.
+        this._hideUndo();
         this._applyDraftState(result.hasUnpublishedChanges);
         this.reload();
     }
@@ -360,6 +387,7 @@ export default class extends Controller {
         // from the preview in place instead of reloading the whole iframe.
         this._applyDraftState(true);
         this._removeBlockFromPreview(blockId);
+        this._offerUndo('block', blockId);
     }
 
     /**
@@ -488,7 +516,9 @@ export default class extends Controller {
 
     async _deleteSection(sectionId) {
         if (!sectionId) return;
-        await this._jsonRequest('DELETE', `/_content-blocks/section/${sectionId}`);
+        const result = await this._jsonRequest('DELETE', `/_content-blocks/section/${sectionId}`);
+        // Delete failed (CSRF/access/network) — leave the preview untouched.
+        if (result === null) return;
         // Direct case: the focused element is the section itself. The
         // cascading case (a focused block lived inside this section) is
         // caught after reload via the iframe's `cb:focus:not-found` reply.
@@ -496,6 +526,7 @@ export default class extends Controller {
             this._resetSidebarToEmptyState();
         }
         this._afterStructuralOp();
+        this._offerUndo('section', sectionId);
     }
 
     _isSidebarFocusedOnBlock(blockId) {
@@ -540,16 +571,146 @@ export default class extends Controller {
 
         this._beginLoading();
         try {
-            const response = await fetch(url, init);
+            let response;
+            try {
+                response = await fetch(url, init);
+            } catch (e) {
+                // Network failure (offline, DNS, aborted) — without this catch
+                // the rejection would propagate to callers that never handle
+                // it, and the editor would get zero feedback.
+                console.error('[cb-builder] request failed', method, url, e);
+                this._showSaveError();
+                return null;
+            }
             if (!response.ok) {
                 console.error('[cb-builder] request failed', method, url, response.status);
+                this._showSaveError();
                 return null;
             }
 
+            this._clearSaveError();
             return await response.json().catch(() => null);
         } finally {
             this._endLoading();
         }
+    }
+
+    // ---------- Save-failure feedback ----------
+
+    /**
+     * A Live Component connected somewhere under the shell (block edit form
+     * in the sidebar). Hook its two failure paths:
+     *  - `response:error`  — the server answered with a non-component
+     *    response (500, expired session…). We suppress Live's default
+     *    raw-HTML error modal in favour of the topbar banner.
+     *  - network failure   — Live's own request promise has no rejection
+     *    handler at all (the save dies silently), so we attach one through
+     *    the `loading.state:started` hook, which receives the request.
+     */
+    _onLiveConnect(event) {
+        const component = event.detail?.component;
+        if (!component || typeof component.on !== 'function') return;
+        component.on('response:error', (backendResponse, controls) => {
+            controls.displayError = false;
+            this._signalSaveError(component.element);
+        });
+        component.on('loading.state:started', (el, request) => {
+            request?.promise?.catch(() => {
+                // Live never resets `backendRequest` when its request
+                // rejects, so every subsequent action would queue behind the
+                // dead request forever — the component is wedged and the
+                // editor's retry would silently do nothing. Clear it so the
+                // next interaction can actually re-save.
+                if (component.backendRequest === request) {
+                    component.backendRequest = null;
+                }
+                this._signalSaveError(component.element);
+            });
+        });
+    }
+
+    /**
+     * Route a save failure detected on a Live form. Dispatching cb:save:error
+     * on the form's autosave wrapper kills two birds: cb-autosave resets its
+     * dirty-detection baseline (so the next interaction re-attempts the save
+     * instead of considering the failed state "already saved"), and the event
+     * bubbles back up to our own cb:save:error listener which shows the
+     * banner. Falls back to showing the banner directly when the form has no
+     * autosave wrapper.
+     */
+    _signalSaveError(fromElement) {
+        const autosaveEl = fromElement?.querySelector?.('[data-controller~="cb-autosave"]');
+        if (autosaveEl) {
+            autosaveEl.dispatchEvent(new CustomEvent('cb:save:error', { bubbles: true }));
+        } else {
+            this._showSaveError();
+        }
+    }
+
+    _onSaveError() {
+        this._showSaveError();
+    }
+
+    /**
+     * Persistent (non-flashing) error banner in the topbar: unlike the
+     * transient "Saved" flash, it stays visible until a subsequent save
+     * succeeds — the editor must know their latest edits are not stored.
+     */
+    _showSaveError() {
+        if (!this.hasSaveErrorTarget) return;
+        this.saveErrorTarget.hidden = false;
+    }
+
+    _clearSaveError() {
+        if (!this.hasSaveErrorTarget) return;
+        this.saveErrorTarget.hidden = true;
+    }
+
+    // ---------- Undo delete (snackbar) ----------
+
+    /**
+     * Deletes are immediate (no confirm dialog) and the only other recovery
+     * is discarding the WHOLE draft — far too coarse for one mis-click. So
+     * after every delete we offer a one-click undo for a few seconds. The
+     * offer is single-slot (a newer delete replaces it), which matches the
+     * usual snackbar pattern.
+     */
+    _offerUndo(kind, id) {
+        if (!this.hasUndoBarTarget) return;
+        this._pendingUndo = { kind, id };
+        if (this.hasUndoLabelTarget) {
+            const key = kind === 'section' ? 'cbBuilderUndoSectionDeleted' : 'cbBuilderUndoBlockDeleted';
+            this.undoLabelTarget.textContent = this.undoBarTarget.dataset[key] || '';
+        }
+        this.undoBarTarget.hidden = false;
+        clearTimeout(this._undoTimer);
+        this._undoTimer = setTimeout(() => this._hideUndo(), this.constructor.UNDO_TIMEOUT_MS);
+    }
+
+    _hideUndo() {
+        clearTimeout(this._undoTimer);
+        this._pendingUndo = null;
+        if (this.hasUndoBarTarget) this.undoBarTarget.hidden = true;
+    }
+
+    /** Action: the snackbar's "Undo" button. */
+    async undoDelete(event) {
+        if (event) event.preventDefault();
+        const pending = this._pendingUndo;
+        // Hide first: whatever the outcome, the offer is consumed (a failed
+        // restore surfaces the save-error banner via _jsonRequest).
+        this._hideUndo();
+        if (!pending) return;
+        const result = await this._jsonRequest(
+            'POST',
+            `/_content-blocks/${pending.kind}/${pending.id}/restore`,
+        );
+        if (result === null) return;
+        // The restored element comes back with its full subtree — simplest
+        // correct refresh is a full reload (undo is rare; no need for the
+        // hot-reload path here).
+        this._applyDraftState(true);
+        this.reload();
     }
 
     setViewport(event) {
@@ -967,6 +1128,8 @@ export default class extends Controller {
     }
 
     _flashSaved() {
+        // A successful save supersedes any earlier failure.
+        this._clearSaveError();
         if (!this.hasSavedFlashTarget) return;
         const el = this.savedFlashTarget;
         el.hidden = false;
