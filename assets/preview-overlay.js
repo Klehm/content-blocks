@@ -435,6 +435,178 @@
         el.remove();
     }
 
+    /**
+     * Inserts a freshly-rendered block at the end of its column — ahead of the
+     * permanent "+ Block" button sentinel — after a server-confirmed add,
+     * instead of reloading the iframe. Dispatches cb:block:rendered so a
+     * JS-enhanced view can initialise (page scripts don't re-run on injected
+     * HTML), then focuses the new block so its toolbar + outline appear, the
+     * same end state the old reload path produced.
+     */
+    function insertBlock(columnId, html) {
+        const column = document.querySelector(`[data-cb-column-id="${columnId}"]`);
+        if (!column) {
+            // Column not in the DOM — let the parent fall back to a reload.
+            postToParent('cb:reorder:desync');
+            return;
+        }
+        const tpl = document.createElement('template');
+        tpl.innerHTML = html.trim();
+        const newEl = tpl.content.firstElementChild;
+        if (!newEl) return;
+
+        // A new block always lands at the end of its column, before the +Block
+        // button (its only non-block sibling).
+        const addBtn = column.querySelector('.cb-add-block-inline');
+        if (addBtn) {
+            addBtn.before(newEl);
+        } else {
+            column.appendChild(newEl);
+        }
+
+        newEl.dispatchEvent(new CustomEvent('cb:block:rendered', {
+            bubbles: true,
+            detail: { blockId: parseInt(newEl.getAttribute('data-cb-block-id'), 10) },
+        }));
+
+        focusElement(newEl, 'block');
+    }
+
+    /**
+     * Drops a freshly-rendered block duplicate into the preview in place,
+     * anchored right after its source node — the same slot the server inserted
+     * the copy at — instead of reloading the iframe. Dispatches
+     * cb:block:rendered so a JS-enhanced view can initialise (page scripts
+     * don't re-run on injected HTML). Focus is left untouched: the source stays
+     * selected, mirroring the pre-reload behaviour.
+     */
+    function insertBlockAfter(sourceId, html) {
+        const source = document.querySelector(`[data-cb-block-id="${sourceId}"]`);
+        if (!source) {
+            // The source vanished — the DOM drifted from the server's model.
+            postToParent('cb:reorder:desync');
+            return;
+        }
+        const tpl = document.createElement('template');
+        tpl.innerHTML = html.trim();
+        const newEl = tpl.content.firstElementChild;
+        if (!newEl) return;
+
+        source.after(newEl);
+
+        newEl.dispatchEvent(new CustomEvent('cb:block:rendered', {
+            bubbles: true,
+            detail: { blockId: parseInt(newEl.getAttribute('data-cb-block-id'), 10) },
+        }));
+    }
+
+    /**
+     * Drops a freshly-rendered section duplicate into the preview in place,
+     * anchored right after its source section. Re-fires cb:block:rendered on
+     * every inner block so JS-enhanced (but hot-reload-capable) views
+     * initialise — the duplicate endpoint only ships section markup when all of
+     * its blocks opt into hot reload, so this is always safe.
+     */
+    function insertSectionAfter(sourceId, html) {
+        const source = document.querySelector(`[data-cb-section-id="${sourceId}"]`);
+        if (!source) {
+            postToParent('cb:reorder:desync');
+            return;
+        }
+        const tpl = document.createElement('template');
+        tpl.innerHTML = html.trim();
+        const newEl = tpl.content.firstElementChild;
+        if (!newEl) return;
+
+        source.after(newEl);
+
+        newEl.querySelectorAll('[data-cb-block-id]').forEach((block) => {
+            block.dispatchEvent(new CustomEvent('cb:block:rendered', {
+                bubbles: true,
+                detail: { blockId: parseInt(block.getAttribute('data-cb-block-id'), 10) },
+            }));
+        });
+    }
+
+    /**
+     * Relocates an existing block node to a new column/position in place after
+     * a server-confirmed reorder, instead of reloading the iframe. Moving the
+     * live node (rather than re-rendering it) preserves the block's DOM + JS
+     * state — e.g. a rich-text editor mid-edit survives the move.
+     *
+     * `position` is the index among VISIBLE (non-deleted) blocks in the target
+     * column — the same index the drag logic computed and the server applied.
+     */
+    function moveBlockInPlace(blockId, toColumnId, position) {
+        const el = document.querySelector(`[data-cb-block-id="${blockId}"]`);
+        const column = document.querySelector(`[data-cb-column-id="${toColumnId}"]`);
+        if (!el || !column) {
+            // The DOM drifted from the server's model — bail to a full reload.
+            postToParent('cb:reorder:desync');
+            return;
+        }
+        const siblings = Array.from(column.querySelectorAll('[data-cb-block-id]'))
+            .filter((b) => b !== el && b.dataset.cbDeleted !== '1');
+        placeAmong(el, column, siblings, position);
+        if (focusedEl === el) positionToolbarFor(el, focusedKind);
+    }
+
+    /**
+     * Relocates a section node to a new index in place (drag & drop reorder).
+     * `position` is the index among visible (non-deleted) sibling sections.
+     */
+    function moveSectionInPlace(sectionId, position) {
+        const el = document.querySelector(`[data-cb-section-id="${sectionId}"]`);
+        if (!el || !el.parentElement) {
+            postToParent('cb:reorder:desync');
+            return;
+        }
+        const container = el.parentElement;
+        const siblings = Array.from(container.querySelectorAll(':scope > [data-cb-section-id]'))
+            .filter((s) => s !== el && s.dataset.cbDeleted !== '1');
+        placeAmong(el, container, siblings, position);
+        if (focusedEl === el) positionToolbarFor(el, focusedKind);
+    }
+
+    /**
+     * Nudges a section one slot up or down in place (the toolbar arrows). Swaps
+     * the node with its previous/next visible sibling — the same swap the
+     * server applied to the preview positions.
+     */
+    function moveSectionByDirection(sectionId, direction) {
+        const el = document.querySelector(`[data-cb-section-id="${sectionId}"]`);
+        if (!el || !el.parentElement) {
+            postToParent('cb:reorder:desync');
+            return;
+        }
+        const visible = Array.from(el.parentElement.querySelectorAll(':scope > [data-cb-section-id]'))
+            .filter((s) => s.dataset.cbDeleted !== '1');
+        const idx = visible.indexOf(el);
+        if (direction === 'up' && idx > 0) {
+            visible[idx - 1].before(el);
+        } else if (direction === 'down' && idx < visible.length - 1) {
+            visible[idx + 1].after(el);
+        }
+        if (focusedEl === el) positionToolbarFor(el, focusedKind);
+    }
+
+    /**
+     * Inserts `el` among a visible-only, source-excluded `siblings` list at
+     * `position`. Past the end we anchor after the last sibling (not
+     * appendChild) so the node lands ahead of any trailing sentinel — the
+     * in-column "Add block" button or the section tray. An empty list prepends
+     * into the container, again ahead of that sentinel.
+     */
+    function placeAmong(el, container, siblings, position) {
+        if (position < siblings.length) {
+            siblings[position].before(el);
+        } else if (siblings.length > 0) {
+            siblings[siblings.length - 1].after(el);
+        } else {
+            container.prepend(el);
+        }
+    }
+
     // ---------- Drag & drop ----------
 
     // Single reusable drop indicator (a thin blue bar). We position it at the
@@ -788,11 +960,60 @@
             return;
         }
 
+        // Hot insert: drop a freshly-added block into its column in place.
+        if (data.type === 'cb:block:insert'
+            && Number.isFinite(data.columnId)
+            && typeof data.html === 'string') {
+            insertBlock(data.columnId, data.html);
+            return;
+        }
+
+        // Hot duplicate: drop a block copy right after its source.
+        if (data.type === 'cb:block:duplicate:apply'
+            && Number.isFinite(data.sourceId)
+            && typeof data.html === 'string') {
+            insertBlockAfter(data.sourceId, data.html);
+            return;
+        }
+
+        // Hot duplicate: drop a section copy right after its source.
+        if (data.type === 'cb:section:duplicate:apply'
+            && Number.isFinite(data.sourceId)
+            && typeof data.html === 'string') {
+            insertSectionAfter(data.sourceId, data.html);
+            return;
+        }
+
         // Hot reload: patch a single section's style (wrapper + columns) in place.
         if (data.type === 'cb:section:patch'
             && Number.isFinite(data.sectionId)
             && typeof data.html === 'string') {
             patchSection(data.sectionId, data.html);
+            return;
+        }
+
+        // Reorder: relocate a block node in place after a confirmed move.
+        if (data.type === 'cb:block:reorder:apply'
+            && Number.isFinite(data.blockId)
+            && Number.isFinite(data.toColumnId)
+            && Number.isFinite(data.position)) {
+            moveBlockInPlace(data.blockId, data.toColumnId, data.position);
+            return;
+        }
+
+        // Reorder: relocate a section node in place (drag & drop).
+        if (data.type === 'cb:section:reorder:apply'
+            && Number.isFinite(data.sectionId)
+            && Number.isFinite(data.position)) {
+            moveSectionInPlace(data.sectionId, data.position);
+            return;
+        }
+
+        // Reorder: nudge a section up/down in place (toolbar arrows).
+        if (data.type === 'cb:section:move:apply'
+            && Number.isFinite(data.sectionId)
+            && (data.direction === 'up' || data.direction === 'down')) {
+            moveSectionByDirection(data.sectionId, data.direction);
             return;
         }
 

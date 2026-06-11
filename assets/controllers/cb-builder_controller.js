@@ -309,13 +309,42 @@ export default class extends Controller {
     async _addBlock(columnId, blockType) {
         if (!columnId || !blockType) return;
         const result = await this._jsonRequest('POST', `/_content-blocks/column/${columnId}/blocks`, { type: blockType });
-        this._afterStructuralOp();
-        // Open the edit sidebar on the freshly-created block so the user
-        // can fill it in immediately. The iframe reload triggered above
-        // happens in parallel — the sidebar mount fetches its HTML from a
-        // separate endpoint so it doesn't need to wait.
-        if (result?.id) {
+        // Create failed (CSRF/access/network) — leave the preview untouched.
+        if (result === null) return;
+        this._applyDraftState(true);
+        // A static / CSS-only block ships its rendered markup: drop it into the
+        // preview in place. A JS-dependent block opts out (no html) and needs a
+        // full reload so its scripts run.
+        if (result.hotReload && typeof result.html === 'string') {
+            this._insertBlockInPreview(columnId, result.html);
+        } else {
+            this.reload();
+        }
+        // Open the edit sidebar on the freshly-created block so the user can
+        // fill it in immediately. The insert/reload above happens in parallel —
+        // the sidebar mount fetches its HTML from a separate endpoint.
+        if (result.id) {
             this._mountSidebar(result.id);
+        }
+    }
+
+    /**
+     * Asks the preview overlay to insert a freshly-rendered block at the end of
+     * its column (ahead of the permanent "+ Block" button). Falls back to a
+     * full reload if the iframe can't be reached.
+     */
+    _insertBlockInPreview(columnId, html) {
+        if (!this.hasIframeTarget) {
+            this.reload();
+            return;
+        }
+        try {
+            this.iframeTarget.contentWindow?.postMessage(
+                { type: 'cb:block:insert', columnId: parseInt(columnId, 10), html },
+                window.location.origin,
+            );
+        } catch (_) {
+            this.reload();
         }
     }
 
@@ -354,35 +383,107 @@ export default class extends Controller {
 
     async _moveBlock(blockId, toColumnId, position) {
         if (!blockId || !toColumnId) return;
-        await this._jsonRequest('POST', `/_content-blocks/block/${blockId}/move`, {
+        const finalPosition = position ?? 0;
+        const result = await this._jsonRequest('POST', `/_content-blocks/block/${blockId}/move`, {
             toColumnId,
-            position: position ?? 0,
+            position: finalPosition,
         });
-        this._afterStructuralOp();
+        // Move failed (CSRF/access/network) — leave the preview untouched.
+        if (result === null) return;
+        this._applyDraftState(true);
+        // Server reports the move was a no-op (e.g. the block vanished) —
+        // there's nothing to reposition.
+        if (result.moved === false) return;
+        // A reorder only changes sibling order: relocate the live block node
+        // in place (preserving its DOM + JS state) instead of reloading.
+        this._reorderInPreview({ type: 'cb:block:reorder:apply', blockId, toColumnId, position: finalPosition });
     }
 
     async _moveSection(sectionId, direction) {
         if (!sectionId || !['up', 'down'].includes(direction)) return;
-        await this._jsonRequest('POST', `/_content-blocks/section/${sectionId}/move`, { direction });
-        this._afterStructuralOp();
+        const result = await this._jsonRequest('POST', `/_content-blocks/section/${sectionId}/move`, { direction });
+        if (result === null) return;
+        this._applyDraftState(true);
+        // Already at the edge — the server couldn't move it, so neither do we.
+        if (result.moved === false) return;
+        this._reorderInPreview({ type: 'cb:section:move:apply', sectionId, direction });
     }
 
     async _reorderSection(sectionId, position) {
         if (!sectionId || !Number.isInteger(position) || position < 0) return;
-        await this._jsonRequest('POST', `/_content-blocks/section/${sectionId}/move`, { position });
-        this._afterStructuralOp();
+        const result = await this._jsonRequest('POST', `/_content-blocks/section/${sectionId}/move`, { position });
+        if (result === null) return;
+        this._applyDraftState(true);
+        if (result.moved === false) return;
+        this._reorderInPreview({ type: 'cb:section:reorder:apply', sectionId, position });
+    }
+
+    /**
+     * Asks the preview overlay to relocate an existing section/block node in
+     * place after a server-confirmed reorder. Moving the live node keeps the
+     * block's DOM + JS state intact (a re-render or full reload would discard
+     * it). Falls back to a full reload if the iframe can't be reached.
+     */
+    _reorderInPreview(message) {
+        if (!this.hasIframeTarget) {
+            this.reload();
+            return;
+        }
+        try {
+            this.iframeTarget.contentWindow?.postMessage(message, window.location.origin);
+        } catch (_) {
+            this.reload();
+        }
     }
 
     async _duplicateSection(sectionId) {
         if (!sectionId) return;
-        await this._jsonRequest('POST', `/_content-blocks/section/${sectionId}/duplicate`);
-        this._afterStructuralOp();
+        const result = await this._jsonRequest('POST', `/_content-blocks/section/${sectionId}/duplicate`);
+        // Duplicate failed (CSRF/access/network) — leave the preview untouched.
+        if (result === null) return;
+        this._applyDraftState(true);
+        // A section whose blocks all hot-reload ships its rendered markup: drop
+        // the copy into the preview in place, right after the source. A section
+        // carrying a JS-dependent block opts out (no html) and needs a full
+        // reload so its scripts run.
+        if (result.hotReload && typeof result.html === 'string') {
+            this._duplicateInPreview({ type: 'cb:section:duplicate:apply', sourceId: sectionId, html: result.html });
+        } else {
+            this.reload();
+        }
     }
 
     async _duplicateBlock(blockId) {
         if (!blockId) return;
-        await this._jsonRequest('POST', `/_content-blocks/block/${blockId}/duplicate`);
-        this._afterStructuralOp();
+        const result = await this._jsonRequest('POST', `/_content-blocks/block/${blockId}/duplicate`);
+        // Duplicate failed (CSRF/access/network) — leave the preview untouched.
+        if (result === null) return;
+        this._applyDraftState(true);
+        // Same policy as _addBlock: a static / CSS-only copy ships its markup
+        // and lands in place (right after the source); a JS-dependent block
+        // opts out (no html) and falls back to a full reload.
+        if (result.hotReload && typeof result.html === 'string') {
+            this._duplicateInPreview({ type: 'cb:block:duplicate:apply', sourceId: blockId, html: result.html });
+        } else {
+            this.reload();
+        }
+    }
+
+    /**
+     * Asks the preview overlay to drop a freshly-rendered duplicate into place,
+     * anchored right after its source node. Falls back to a full reload if the
+     * iframe can't be reached.
+     */
+    _duplicateInPreview(message) {
+        if (!this.hasIframeTarget) {
+            this.reload();
+            return;
+        }
+        try {
+            this.iframeTarget.contentWindow?.postMessage(message, window.location.origin);
+        } catch (_) {
+            this.reload();
+        }
     }
 
     async _deleteSection(sectionId) {
@@ -509,6 +610,11 @@ export default class extends Controller {
                 // element no longer exists (e.g. a section delete cascaded
                 // to a focused child block). Clear the stale form.
                 this._resetSidebarToEmptyState();
+                break;
+            case 'cb:reorder:desync':
+                // The overlay couldn't find a node it was asked to relocate —
+                // its DOM drifted from the server's model. Reload to resync.
+                this.reload();
                 break;
             default:
                 // Unknown cb:* message — silently ignore (forward-compat).

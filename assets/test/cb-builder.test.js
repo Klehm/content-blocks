@@ -605,10 +605,47 @@ describe('cb-builder: structural AJAX handlers', () => {
         reloadSpy = vi.spyOn(controller, 'reload').mockImplementation(() => {});
     });
 
-    it('_addBlock posts to column/{id}/blocks with type and reloads', async () => {
+    it('_addBlock inserts the block in place when the server ships hot-reload html', async () => {
+        reqSpy.mockResolvedValueOnce({ id: 9, hotReload: true, html: '<div data-cb-block-id="9"></div>' });
+        const insertSpy = vi.spyOn(controller, '_insertBlockInPreview').mockImplementation(() => {});
+
         await controller._addBlock(7, 'text');
+
         expect(reqSpy).toHaveBeenCalledWith('POST', '/_content-blocks/column/7/blocks', { type: 'text' });
+        expect(insertSpy).toHaveBeenCalledWith(7, '<div data-cb-block-id="9"></div>');
+        expect(reloadSpy).not.toHaveBeenCalled();
+    });
+
+    it('_addBlock falls back to a full reload for a JS-dependent block (no html)', async () => {
+        reqSpy.mockResolvedValueOnce({ id: 9, hotReload: false });
+        const insertSpy = vi.spyOn(controller, '_insertBlockInPreview').mockImplementation(() => {});
+
+        await controller._addBlock(7, 'custom');
+
         expect(reloadSpy).toHaveBeenCalled();
+        expect(insertSpy).not.toHaveBeenCalled();
+    });
+
+    it('_addBlock leaves the preview untouched when create fails', async () => {
+        reqSpy.mockResolvedValueOnce(null);
+        const insertSpy = vi.spyOn(controller, '_insertBlockInPreview').mockImplementation(() => {});
+
+        await controller._addBlock(7, 'text');
+
+        expect(insertSpy).not.toHaveBeenCalled();
+        expect(reloadSpy).not.toHaveBeenCalled();
+    });
+
+    it('_insertBlockInPreview posts cb:block:insert to the iframe', () => {
+        const postSpy = vi.spyOn(controller.iframeTarget.contentWindow, 'postMessage').mockImplementation(() => {});
+
+        controller._insertBlockInPreview(7, '<div data-cb-block-id="9"></div>');
+
+        expect(postSpy).toHaveBeenCalledWith(
+            { type: 'cb:block:insert', columnId: 7, html: '<div data-cb-block-id="9"></div>' },
+            window.location.origin,
+        );
+        expect(reloadSpy).not.toHaveBeenCalled();
     });
 
     it('_addBlock no-ops when columnId or type is missing', async () => {
@@ -687,19 +724,45 @@ describe('cb-builder: structural AJAX handlers', () => {
         expect(reloadSpy).not.toHaveBeenCalled();
     });
 
-    it('_moveBlock posts to block/{id}/move with target column + position', async () => {
+    it('_moveBlock posts the move then relocates the block in place (no full reload)', async () => {
+        const postSpy = vi.spyOn(controller.iframeTarget.contentWindow, 'postMessage').mockImplementation(() => {});
         await controller._moveBlock(42, 3, 2);
         expect(reqSpy).toHaveBeenCalledWith('POST', '/_content-blocks/block/42/move', {
             toColumnId: 3,
             position: 2,
         });
-        expect(reloadSpy).toHaveBeenCalled();
+        expect(postSpy).toHaveBeenCalledWith(
+            { type: 'cb:block:reorder:apply', blockId: 42, toColumnId: 3, position: 2 },
+            window.location.origin,
+        );
+        expect(reloadSpy).not.toHaveBeenCalled();
     });
 
-    it('_moveSection posts to section/{id}/move with direction', async () => {
+    it('_moveBlock leaves the preview untouched when the move fails', async () => {
+        reqSpy.mockResolvedValueOnce(null);
+        const postSpy = vi.spyOn(controller.iframeTarget.contentWindow, 'postMessage').mockImplementation(() => {});
+        await controller._moveBlock(42, 3, 2);
+        expect(postSpy).not.toHaveBeenCalled();
+        expect(reloadSpy).not.toHaveBeenCalled();
+    });
+
+    it('_moveSection posts the move then nudges the section in place (no full reload)', async () => {
+        const postSpy = vi.spyOn(controller.iframeTarget.contentWindow, 'postMessage').mockImplementation(() => {});
         await controller._moveSection(5, 'up');
         expect(reqSpy).toHaveBeenCalledWith('POST', '/_content-blocks/section/5/move', { direction: 'up' });
-        expect(reloadSpy).toHaveBeenCalled();
+        expect(postSpy).toHaveBeenCalledWith(
+            { type: 'cb:section:move:apply', sectionId: 5, direction: 'up' },
+            window.location.origin,
+        );
+        expect(reloadSpy).not.toHaveBeenCalled();
+    });
+
+    it('_moveSection does not touch the preview when the section is already at the edge', async () => {
+        reqSpy.mockResolvedValueOnce({ moved: false });
+        const postSpy = vi.spyOn(controller.iframeTarget.contentWindow, 'postMessage').mockImplementation(() => {});
+        await controller._moveSection(5, 'up');
+        expect(postSpy).not.toHaveBeenCalled();
+        expect(reloadSpy).not.toHaveBeenCalled();
     });
 
     it('_moveSection rejects unknown direction', async () => {
@@ -708,10 +771,15 @@ describe('cb-builder: structural AJAX handlers', () => {
         expect(reloadSpy).not.toHaveBeenCalled();
     });
 
-    it('_reorderSection posts to section/{id}/move with position and reloads', async () => {
+    it('_reorderSection posts the move then relocates the section in place (no full reload)', async () => {
+        const postSpy = vi.spyOn(controller.iframeTarget.contentWindow, 'postMessage').mockImplementation(() => {});
         await controller._reorderSection(5, 3);
         expect(reqSpy).toHaveBeenCalledWith('POST', '/_content-blocks/section/5/move', { position: 3 });
-        expect(reloadSpy).toHaveBeenCalled();
+        expect(postSpy).toHaveBeenCalledWith(
+            { type: 'cb:section:reorder:apply', sectionId: 5, position: 3 },
+            window.location.origin,
+        );
+        expect(reloadSpy).not.toHaveBeenCalled();
     });
 
     it('_reorderSection no-ops on a missing or invalid position', async () => {
@@ -722,16 +790,78 @@ describe('cb-builder: structural AJAX handlers', () => {
         expect(reloadSpy).not.toHaveBeenCalled();
     });
 
-    it('_duplicateSection posts to section/{id}/duplicate and reloads', async () => {
+    it('_duplicateSection inserts the copy in place when the server ships hot-reload html', async () => {
+        reqSpy.mockResolvedValueOnce({ id: 8, sourceId: 7, hotReload: true, html: '<section data-cb-section-id="8"></section>' });
+        const dupSpy = vi.spyOn(controller, '_duplicateInPreview').mockImplementation(() => {});
+
         await controller._duplicateSection(7);
+
         expect(reqSpy).toHaveBeenCalledWith('POST', '/_content-blocks/section/7/duplicate');
-        expect(reloadSpy).toHaveBeenCalled();
+        expect(dupSpy).toHaveBeenCalledWith({ type: 'cb:section:duplicate:apply', sourceId: 7, html: '<section data-cb-section-id="8"></section>' });
+        expect(reloadSpy).not.toHaveBeenCalled();
     });
 
-    it('_duplicateBlock posts to block/{id}/duplicate and reloads', async () => {
-        await controller._duplicateBlock(42);
-        expect(reqSpy).toHaveBeenCalledWith('POST', '/_content-blocks/block/42/duplicate');
+    it('_duplicateSection falls back to a full reload when a block opts out of hot reload', async () => {
+        reqSpy.mockResolvedValueOnce({ id: 8, sourceId: 7, hotReload: false });
+        const dupSpy = vi.spyOn(controller, '_duplicateInPreview').mockImplementation(() => {});
+
+        await controller._duplicateSection(7);
+
         expect(reloadSpy).toHaveBeenCalled();
+        expect(dupSpy).not.toHaveBeenCalled();
+    });
+
+    it('_duplicateSection leaves the preview untouched when the duplicate fails', async () => {
+        reqSpy.mockResolvedValueOnce(null);
+        const dupSpy = vi.spyOn(controller, '_duplicateInPreview').mockImplementation(() => {});
+
+        await controller._duplicateSection(7);
+
+        expect(dupSpy).not.toHaveBeenCalled();
+        expect(reloadSpy).not.toHaveBeenCalled();
+    });
+
+    it('_duplicateBlock inserts the copy in place when the server ships hot-reload html', async () => {
+        reqSpy.mockResolvedValueOnce({ id: 43, sourceId: 42, hotReload: true, html: '<div data-cb-block-id="43"></div>' });
+        const dupSpy = vi.spyOn(controller, '_duplicateInPreview').mockImplementation(() => {});
+
+        await controller._duplicateBlock(42);
+
+        expect(reqSpy).toHaveBeenCalledWith('POST', '/_content-blocks/block/42/duplicate');
+        expect(dupSpy).toHaveBeenCalledWith({ type: 'cb:block:duplicate:apply', sourceId: 42, html: '<div data-cb-block-id="43"></div>' });
+        expect(reloadSpy).not.toHaveBeenCalled();
+    });
+
+    it('_duplicateBlock falls back to a full reload for a JS-dependent block (no html)', async () => {
+        reqSpy.mockResolvedValueOnce({ id: 43, sourceId: 42, hotReload: false });
+        const dupSpy = vi.spyOn(controller, '_duplicateInPreview').mockImplementation(() => {});
+
+        await controller._duplicateBlock(42);
+
+        expect(reloadSpy).toHaveBeenCalled();
+        expect(dupSpy).not.toHaveBeenCalled();
+    });
+
+    it('_duplicateBlock leaves the preview untouched when the duplicate fails', async () => {
+        reqSpy.mockResolvedValueOnce(null);
+        const dupSpy = vi.spyOn(controller, '_duplicateInPreview').mockImplementation(() => {});
+
+        await controller._duplicateBlock(42);
+
+        expect(dupSpy).not.toHaveBeenCalled();
+        expect(reloadSpy).not.toHaveBeenCalled();
+    });
+
+    it('_duplicateInPreview posts the apply message to the iframe', () => {
+        const postSpy = vi.spyOn(controller.iframeTarget.contentWindow, 'postMessage').mockImplementation(() => {});
+
+        controller._duplicateInPreview({ type: 'cb:block:duplicate:apply', sourceId: 42, html: '<div data-cb-block-id="43"></div>' });
+
+        expect(postSpy).toHaveBeenCalledWith(
+            { type: 'cb:block:duplicate:apply', sourceId: 42, html: '<div data-cb-block-id="43"></div>' },
+            window.location.origin,
+        );
+        expect(reloadSpy).not.toHaveBeenCalled();
     });
 
     it('_deleteSection issues DELETE and reloads', async () => {
