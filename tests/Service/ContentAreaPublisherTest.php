@@ -2,13 +2,13 @@
 
 declare(strict_types=1);
 
-namespace ContentBlocks\Tests\Publishing;
+namespace ContentBlocks\Tests\Service;
 
 use ContentBlocks\Entity\Block;
 use ContentBlocks\Entity\Column;
 use ContentBlocks\Entity\ContentArea;
 use ContentBlocks\Entity\Section;
-use ContentBlocks\Publishing\ContentAreaPublisher;
+use ContentBlocks\Service\ContentAreaPublisher;
 use Doctrine\ORM\EntityManagerInterface;
 use PHPUnit\Framework\TestCase;
 

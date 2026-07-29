@@ -2,12 +2,12 @@
 
 declare(strict_types=1);
 
-namespace ContentBlocks\Tests\Section;
+namespace ContentBlocks\Tests\Service;
 
 use ContentBlocks\Entity\Block;
 use ContentBlocks\Entity\Column;
 use ContentBlocks\Entity\Section;
-use ContentBlocks\Section\SectionCloner;
+use ContentBlocks\Service\SectionCloner;
 use PHPUnit\Framework\TestCase;
 
 final class SectionClonerTest extends TestCase

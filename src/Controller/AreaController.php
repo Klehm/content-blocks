@@ -7,7 +7,7 @@ namespace ContentBlocks\Controller;
 use ContentBlocks\Entity\ContentArea;
 use ContentBlocks\Security\AccessCheckerInterface;
 use ContentBlocks\Security\ContentBlocksAccessDeniedException;
-use ContentBlocks\Publishing\ContentAreaPublisherInterface;
+use ContentBlocks\Service\ContentAreaPublisher;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -28,7 +28,7 @@ final class AreaController
     public function __construct(
         private readonly EntityManagerInterface $em,
         private readonly AccessCheckerInterface $accessChecker,
-        private readonly ContentAreaPublisherInterface $publisher,
+        private readonly ContentAreaPublisher $publisher,
         private readonly CsrfTokenManagerInterface $csrfTokenManager,
     ) {
     }

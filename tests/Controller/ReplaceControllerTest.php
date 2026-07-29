@@ -8,7 +8,7 @@ use ContentBlocks\Controller\ReplaceController;
 use ContentBlocks\Replace\ContentAreaProviderInterface;
 use ContentBlocks\Security\AccessCheckerInterface;
 use ContentBlocks\Security\ContentBlocksAccessDeniedException;
-use ContentBlocks\Section\SectionCloner;
+use ContentBlocks\Service\SectionCloner;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\HttpFoundation\Response;
 

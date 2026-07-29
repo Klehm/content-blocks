@@ -23,10 +23,10 @@ final class StylingBlockDecoratorTest extends TestCase
         $data = [
             'styling' => [
                 'padding' => [
-                    'desktop' => ['top' => 10, 'right' => 20, 'bottom' => 10, 'left' => 20, 'linked' => false],
+                    'd' => ['top' => 10, 'right' => 20, 'bottom' => 10, 'left' => 20, 'linked' => false],
                 ],
                 'margin' => [
-                    'mobile' => ['top' => 5, 'right' => 0, 'bottom' => 5, 'left' => 0, 'linked' => false],
+                    'm' => ['top' => 5, 'right' => 0, 'bottom' => 5, 'left' => 0, 'linked' => false],
                 ],
             ],
         ];

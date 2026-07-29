@@ -20,20 +20,11 @@ use ContentBlocks\Security\AccessCheckerInterface;
 use ContentBlocks\Security\DenyAllAccessChecker;
 use ContentBlocks\SectionTemplate\DenyAllSectionTemplateManager;
 use ContentBlocks\SectionTemplate\SectionTemplateManagerInterface;
-use ContentBlocks\Transfer\ContentAreaExporter;
-use ContentBlocks\Transfer\ContentAreaExporterInterface;
-use ContentBlocks\Transfer\ContentAreaImporter;
-use ContentBlocks\Transfer\ContentAreaImporterInterface;
-use ContentBlocks\Publishing\ContentAreaPublisherInterface;
-use ContentBlocks\Section\SectionCloner;
-use ContentBlocks\Section\SectionClonerInterface;
-use ContentBlocks\SectionTemplate\SectionTemplateInstantiator;
-use ContentBlocks\SectionTemplate\SectionTemplateInstantiatorInterface;
-use ContentBlocks\SectionTemplate\SectionTemplateSerializer;
-use ContentBlocks\SectionTemplate\SectionTemplateSerializerInterface;
-use ContentBlocks\Versioning\ContentVersionUpgraderInterface;
-use ContentBlocks\Versioning\DenyOnMismatchUpgrader;
-use ContentBlocks\Versioning\EnvelopeUpgradeChain;
+use ContentBlocks\Service\ContentAreaExporter;
+use ContentBlocks\Service\ContentAreaImporter;
+use ContentBlocks\Service\SectionCloner;
+use ContentBlocks\Service\SectionTemplateInstantiator;
+use ContentBlocks\Service\SectionTemplateSerializer;
 use Symfony\Component\DependencyInjection\Loader\Configurator\ContainerConfigurator;
 
 use function Symfony\Component\DependencyInjection\Loader\Configurator\tagged_iterator;
@@ -47,11 +38,6 @@ return static function (ContainerConfigurator $container): void {
     // ('full' or 'centered'); `default_max_width` is the cap applied once
     // a section is centered.
     $container->parameters()
-        // Schema generation of the host's block data; normally fed by the
-        // bundle's semantic config (`content_blocks.content_version`). Stamped
-        // onto content as it is written so hosts can target what predates a
-        // change of their own making.
-        ->set('content_blocks.content_version', 1)
         ->set('content_blocks.section.default_width_mode', 'full')
         ->set('content_blocks.section.default_max_width', 1320)
         // List of {label, color} entries; normally fed by the bundle's
@@ -84,10 +70,6 @@ return static function (ContainerConfigurator $container): void {
         // and SectionSettingsType.
         ->bind('int $defaultMaxWidth', '%content_blocks.section.default_max_width%')
         ->bind('string $defaultWidthMode', '%content_blocks.section.default_width_mode%')
-        // Host-owned schema generation of block data: consumed by the exporter
-        // (stamps the payload) and by SectionTemplateController (stamps a
-        // snapshot). ContentAreaTouchListener takes it positionally.
-        ->bind('int $contentVersion', '%content_blocks.content_version%')
         // Upload limits: consumed by UploadController.
         ->bind('int $uploadMaxSize', '%content_blocks.upload.max_size%')
         ->bind('array $uploadAllowedMimeTypes', '%content_blocks.upload.allowed_mime_types%');
@@ -106,7 +88,7 @@ return static function (ContainerConfigurator $container): void {
     // ---------- File storage / uploads ----------
 
     // Default: null storage (throws on upload). Hosts opt in via the
-    // `content_blocks.upload.directory` config (→ LocalFileStorage) or alias
+    // `content_blocks.upload.dir` config (→ LocalFileStorage) or alias
     // FileStorageInterface to their own implementation (S3, Flysystem…).
     $services->set(\ContentBlocks\Storage\NullFileStorage::class);
     $services->alias(\ContentBlocks\Storage\FileStorageInterface::class, \ContentBlocks\Storage\NullFileStorage::class);
@@ -126,50 +108,23 @@ return static function (ContainerConfigurator $container): void {
         ->tag('twig.extension');
 
     $services->set(\ContentBlocks\Rendering\BlockRenderer::class);
-    // Rendering override seam: host decorates/replaces via the interface.
-    $services->alias(\ContentBlocks\Rendering\BlockRendererInterface::class, \ContentBlocks\Rendering\BlockRenderer::class);
 
-    // Draft lifecycle, clone, transfer and section-template services. Each is
-    // registered as its concrete class and aliased to its interface: consumers
-    // type-hint the interface, so a host overrides or decorates any of them
-    // without touching the package.
-    $services->set(\ContentBlocks\Publishing\ContentAreaPublisher::class);
-    $services->alias(ContentAreaPublisherInterface::class, \ContentBlocks\Publishing\ContentAreaPublisher::class);
+    $services->set(\ContentBlocks\Service\ContentAreaPublisher::class);
 
     $services->set(SectionCloner::class);
-    $services->alias(SectionClonerInterface::class, SectionCloner::class);
 
     $services->set(ContentAreaExporter::class);
-    $services->alias(ContentAreaExporterInterface::class, ContentAreaExporter::class);
     $services->set(ContentAreaImporter::class);
-    $services->alias(ContentAreaImporterInterface::class, ContentAreaImporter::class);
 
     // Section-template library: snapshot a section, re-insert it anywhere.
-    // Saving/inserting is gated by AccessCheckerInterface on the area at hand;
-    // managing the shared library (rename/delete) has no area to key off, so it
-    // gets its own capability — deny by default, hosts alias their own.
+    // Serializer + instantiator are plain services. Saving/inserting is gated
+    // by AccessCheckerInterface on the area at hand; managing the shared
+    // library (rename/delete) has no area to key off, so it gets its own
+    // capability — deny by default, hosts alias their own implementation.
     $services->set(SectionTemplateSerializer::class);
-    $services->alias(SectionTemplateSerializerInterface::class, SectionTemplateSerializer::class);
     $services->set(SectionTemplateInstantiator::class);
-    $services->alias(SectionTemplateInstantiatorInterface::class, SectionTemplateInstantiator::class);
     $services->set(DenyAllSectionTemplateManager::class);
     $services->alias(SectionTemplateManagerInterface::class, DenyAllSectionTemplateManager::class);
-
-    // Content-version seam: what to do with stored content from another schema
-    // generation of the *host's* own making. The package cannot know what
-    // changed between two host versions, so the default refuses a known
-    // mismatch (and accepts null, which only means "predates versioning").
-    // Hosts alias this to migrate on read, or to be stricter.
-    $services->set(DenyOnMismatchUpgrader::class);
-    $services->alias(ContentVersionUpgraderInterface::class, DenyOnMismatchUpgrader::class);
-
-    // Envelope upgrade chain: the *package's* side of versioning, migrating a
-    // stored payload's structure forward when this package changes it. Ships
-    // empty — only one format of each kind exists so far — but must exist
-    // before the first bump, since the alternative is condemning every stored
-    // payload. Steps are autoconfigured via EnvelopeUpgraderInterface.
-    $services->set(EnvelopeUpgradeChain::class)
-        ->args([tagged_iterator('content_blocks.envelope_upgrader')]);
 
     // Replace flow: default provider is usable out of the box; hosts
     // override by aliasing ContentAreaProviderInterface to their own
@@ -182,7 +137,6 @@ return static function (ContainerConfigurator $container): void {
     // depend on DoctrineBundle's #[AsDoctrineListener] attribute at the
     // composer level (DoctrineBundle is a host concern).
     $services->set(ContentAreaTouchListener::class)
-        ->args(['%content_blocks.content_version%'])
         ->tag('doctrine.event_listener', ['event' => 'onFlush']);
 
     // ---------- Section settings extension hooks ----------
@@ -261,20 +215,7 @@ return static function (ContainerConfigurator $container): void {
         ->args([tagged_iterator('content_blocks.block_data_defaults')])
         ->public();
 
-    // "Which keys can this block type hold?" — shared by the two restore paths
-    // (section-template insert, area import) so the union rule it encodes lives
-    // in exactly one place.
-    $services->set(\ContentBlocks\Block\BlockDataKeys::class);
-
-    // Form types + the per-block form-extension collection. The collection's
-    // `$extensions` argument (the [extension, target block type ids] pairs) is
-    // populated by BlockFormExtensionPass; empty until a host tags an extension.
-    // The attribute is a marker class read by reflection, never instantiated by
-    // the container, so it is excluded from the glob — registering it would put
-    // a meaningless service in every host's container (and would hard-fail the
-    // day its constructor arguments stop having defaults).
-    $services->load('ContentBlocks\\Form\\', '../src/Form/')
-        ->exclude('../src/Form/Extension/AsBlockFormExtension.php');
+    $services->load('ContentBlocks\\Form\\', '../src/Form/');
 
     $services->load('ContentBlocks\\Controller\\', '../src/Controller/')
         ->tag('controller.service_arguments');

@@ -31,8 +31,8 @@ final class StylingSectionDecoratorTest extends TestCase
         $settings = [
             'styling' => [
                 'padding' => [
-                    'desktop' => ['top' => 10, 'right' => 20, 'bottom' => 30, 'left' => 40, 'linked' => false],
-                    'mobile' => ['top' => 5, 'right' => 5, 'bottom' => 5, 'left' => 5, 'linked' => true],
+                    'd' => ['top' => 10, 'right' => 20, 'bottom' => 30, 'left' => 40, 'linked' => false],
+                    'm' => ['top' => 5, 'right' => 5, 'bottom' => 5, 'left' => 5, 'linked' => true],
                 ],
             ],
         ];
@@ -53,7 +53,7 @@ final class StylingSectionDecoratorTest extends TestCase
         $settings = [
             'styling' => [
                 'margin' => [
-                    'desktop' => ['top' => -8, 'right' => 0, 'bottom' => 0, 'left' => 0, 'linked' => false],
+                    'd' => ['top' => -8, 'right' => 0, 'bottom' => 0, 'left' => 0, 'linked' => false],
                 ],
             ],
         ];
@@ -78,7 +78,7 @@ final class StylingSectionDecoratorTest extends TestCase
     {
         $settings = [
             'styling' => [
-                'gap' => ['desktop' => 24, 'mobile' => 8],
+                'gap' => ['d' => 24, 'm' => 8],
             ],
         ];
 
@@ -93,7 +93,7 @@ final class StylingSectionDecoratorTest extends TestCase
     {
         $deco = (new StylingSectionDecorator());
 
-        $decoration = $deco->decorate(['styling' => ['gap' => ['desktop' => -4, 'tablet' => null, 'mobile' => 12]]], new Section());
+        $decoration = $deco->decorate(['styling' => ['gap' => ['d' => -4, 't' => null, 'm' => 12]]], new Section());
 
         $this->assertArrayNotHasKey('--cb-gap-d', $decoration->inlineStyles);
         $this->assertArrayNotHasKey('--cb-gap-t', $decoration->inlineStyles);
@@ -148,7 +148,7 @@ final class StylingSectionDecoratorTest extends TestCase
         $settings = [
             'styling' => [
                 'padding' => [
-                    'desktop' => ['top' => 10, 'right' => 10, 'bottom' => 10, 'left' => 10, 'linked' => true],
+                    'd' => ['top' => 10, 'right' => 10, 'bottom' => 10, 'left' => 10, 'linked' => true],
                 ],
                 'backgroundColor' => '#0a0a0a',
                 'minHeight' => ['value' => 500, 'unit' => 'px'],

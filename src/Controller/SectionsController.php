@@ -8,11 +8,11 @@ use ContentBlocks\BlockType\BlockTypeRegistry;
 use ContentBlocks\Entity\Column;
 use ContentBlocks\Entity\ContentArea;
 use ContentBlocks\Entity\Section;
-use ContentBlocks\Rendering\BlockRendererInterface;
+use ContentBlocks\Rendering\BlockRenderer;
 use ContentBlocks\Rendering\RenderMode;
 use ContentBlocks\Security\AccessCheckerInterface;
 use ContentBlocks\Security\ContentBlocksAccessDeniedException;
-use ContentBlocks\Section\SectionClonerInterface;
+use ContentBlocks\Service\SectionCloner;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -40,8 +40,8 @@ final class SectionsController
         private readonly EntityManagerInterface $em,
         private readonly AccessCheckerInterface $accessChecker,
         private readonly CsrfTokenManagerInterface $csrfTokenManager,
-        private readonly SectionClonerInterface $sectionCloner,
-        private readonly BlockRendererInterface $blockRenderer,
+        private readonly SectionCloner $sectionCloner,
+        private readonly BlockRenderer $blockRenderer,
         private readonly BlockTypeRegistry $blockTypeRegistry,
     ) {
     }

@@ -2,13 +2,13 @@
 
 declare(strict_types=1);
 
-namespace ContentBlocks\Publishing;
+namespace ContentBlocks\Service;
 
 use ContentBlocks\Entity\ContentArea;
 use Doctrine\ORM\EntityManagerInterface;
 
 /**
- * Default {@see ContentAreaPublisherInterface} — see it for the contract.
+ * Promotes a ContentArea's draft state to published, or discards drafts.
  *
  * Cascade semantics:
  *  - A soft-deleted Section/Column triggers em->remove() on itself; Doctrine's
@@ -17,14 +17,16 @@ use Doctrine\ORM\EntityManagerInterface;
  *  - A non-deleted entity has its draft state promoted: position ← previewPosition,
  *    publishedData ← draftData (Block only), draftData ← null.
  *
- * Discard semantics — an entity never published is a brand-new addition and is
- * dropped entirely, everything else reverts to its last published state:
- *  - Section/Column with publishedAt === null (see Section::isPublished()) is
- *    removed; Doctrine's cascade wipes its descendants.
- *  - Block with publishedData === null is removed.
- *  - Other entities have their draft flags cleared.
+ * Discard semantics:
+ *  - Block with publishedData === null is treated as "newly added, never
+ *    published" and removed.
+ *  - Other entities have their draft flags cleared (revert to last published
+ *    state).
+ *  - Note: a Section/Column added but never published is NOT auto-removed in V1
+ *    — we don't track a hasBeenPublished flag for those. To be revisited when
+ *    the add-section flow lands in phase 3.
  */
-final class ContentAreaPublisher implements ContentAreaPublisherInterface
+final class ContentAreaPublisher
 {
     public function __construct(
         private readonly EntityManagerInterface $em,

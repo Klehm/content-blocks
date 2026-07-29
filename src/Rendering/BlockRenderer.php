@@ -30,8 +30,9 @@ use Twig\Environment;
  * combined with the AccessChecker's canEdit() granting access switches to
  * PREVIEW. Anything else falls through to PUBLIC.
  */
-final class BlockRenderer implements BlockRendererInterface
+final class BlockRenderer
 {
+    public const QUERY_PARAM = 'cb_preview';
     private const RENDER_TEMPLATE = '@ContentBlocks/render/content_area.html.twig';
     private const BLOCK_TEMPLATE = '@ContentBlocks/render/block.html.twig';
     private const SECTION_TEMPLATE = '@ContentBlocks/render/section.html.twig';

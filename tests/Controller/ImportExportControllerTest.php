@@ -8,8 +8,8 @@ use ContentBlocks\Asset\AssetResolverInterface;
 use ContentBlocks\Controller\ImportExportController;
 use ContentBlocks\Security\AccessCheckerInterface;
 use ContentBlocks\Security\ContentBlocksAccessDeniedException;
-use ContentBlocks\Transfer\ContentAreaExporter;
-use ContentBlocks\Transfer\ContentAreaImporter;
+use ContentBlocks\Service\ContentAreaExporter;
+use ContentBlocks\Service\ContentAreaImporter;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Symfony\Component\HttpFoundation\Request;
@@ -40,7 +40,7 @@ final class ImportExportControllerTest extends ControllerTestCase
             $em,
             $accessChecker ?? $this->makeAccessChecker(),
             new ContentAreaExporter($resolver),
-            new ContentAreaImporter($resolver, $this->makeRegistry(), $this->makeDataKeys()),
+            new ContentAreaImporter($resolver),
             $this->makeCsrfManager($csrfValid),
         );
     }
@@ -71,7 +71,7 @@ final class ImportExportControllerTest extends ControllerTestCase
                     'layout' => 'full',
                     'columns' => [[
                         'preset' => 'col-12',
-                        'blocks' => [['type' => 'fake', 'data' => ['content' => 'imported']]],
+                        'blocks' => [['type' => 'text', 'data' => ['content' => 'imported']]],
                     ]],
                 ]],
             ],
@@ -138,9 +138,6 @@ final class ImportExportControllerTest extends ControllerTestCase
         $payload = json_decode((string) $response->getContent(), true);
         $this->assertTrue($payload['imported']);
         $this->assertSame(1, $payload['sectionCount']);
-        $this->assertSame(0, $payload['skippedBlockCount']);
-        $this->assertSame([], $payload['skippedBlockTypes']);
-        $this->assertSame([], $payload['unknownFields']);
         $this->assertTrue($payload['hasUnpublishedChanges']);
 
         // Replace semantics: old section soft-deleted, imported one is a draft.
@@ -151,37 +148,6 @@ final class ImportExportControllerTest extends ControllerTestCase
             $imported->getColumns()[0]->getBlocks()[0]->getDraftData(),
         );
         $this->assertSame(1, $this->flushCount);
-    }
-
-    public function testImportSkipsUnknownBlockTypesWithoutFailing(): void
-    {
-        // Payloads come from other installations, so a block type this app
-        // doesn't have is expected — it is left out and reported, not refused
-        // and not imported as an inert placeholder.
-        $area = $this->makeArea(1);
-        $json = json_encode([
-            'format' => ContentAreaExporter::FORMAT,
-            'contentArea' => ['sections' => [[
-                'layout' => 'full',
-                'columns' => [['preset' => 'col-12', 'blocks' => [
-                    ['type' => 'countdown', 'data' => ['ends' => 'soon']],
-                ]]],
-            ]]],
-            'assets' => [],
-        ], \JSON_THROW_ON_ERROR);
-
-        $controller = $this->makeController($this->makeEm([$area]));
-
-        $response = $controller->import(1, $this->makeUploadRequest($json));
-
-        $this->assertSame(Response::HTTP_OK, $response->getStatusCode());
-        $payload = json_decode((string) $response->getContent(), true);
-        $this->assertSame(1, $payload['sectionCount']);
-        $this->assertSame(1, $payload['skippedBlockCount']);
-        $this->assertSame(['countdown'], $payload['skippedBlockTypes']);
-        $this->assertSame(1, $this->flushCount, 'committed despite the warning');
-        // The section came in, its only block did not.
-        $this->assertCount(0, $area->getSections()[0]->getColumns()[0]->getBlocks());
     }
 
     public function testImportRejectsInvalidCsrf(): void

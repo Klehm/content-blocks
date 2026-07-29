@@ -7,8 +7,8 @@ namespace ContentBlocks\Controller;
 use ContentBlocks\Entity\ContentArea;
 use ContentBlocks\Security\AccessCheckerInterface;
 use ContentBlocks\Security\ContentBlocksAccessDeniedException;
-use ContentBlocks\Transfer\ContentAreaExporterInterface;
-use ContentBlocks\Transfer\ContentAreaImporterInterface;
+use ContentBlocks\Service\ContentAreaExporter;
+use ContentBlocks\Service\ContentAreaImporter;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -39,8 +39,8 @@ final class ImportExportController
     public function __construct(
         private readonly EntityManagerInterface $em,
         private readonly AccessCheckerInterface $accessChecker,
-        private readonly ContentAreaExporterInterface $exporter,
-        private readonly ContentAreaImporterInterface $importer,
+        private readonly ContentAreaExporter $exporter,
+        private readonly ContentAreaImporter $importer,
         private readonly CsrfTokenManagerInterface $csrfTokenManager,
     ) {
     }
@@ -138,21 +138,16 @@ final class ImportExportController
         }
 
         try {
-            $result = $this->importer->import($target, $payload);
+            $count = $this->importer->import($target, $payload);
         } catch (\InvalidArgumentException $e) {
             return new JsonResponse(['error' => $e->getMessage()], Response::HTTP_BAD_REQUEST);
         }
 
         $this->em->flush();
 
-        // Non-blocking by design (see ImportResult): the import succeeded, and
-        // the editor is told what this app could not take in.
         return new JsonResponse([
             'imported' => true,
-            'sectionCount' => $result->sectionCount,
-            'skippedBlockCount' => $result->skippedBlockCount,
-            'skippedBlockTypes' => $result->skippedBlockTypes,
-            'unknownFields' => $result->unknownFields,
+            'sectionCount' => $count,
             'hasUnpublishedChanges' => $target->hasUnpublishedChanges(),
         ]);
     }

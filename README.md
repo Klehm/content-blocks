@@ -78,12 +78,9 @@ Add the following to `assets/controllers.json`:
 }
 ```
 
-That file is the same under either bundler — `assets/controllers.json` is Symfony
-UX's format, not AssetMapper's.
-
-**With AssetMapper**, nothing else to declare. `cb-collection-sort` (drag-and-drop
-reordering of collection fields) depends on
-[SortableJS](https://github.com/SortableJS/Sortable) — pin it in your importmap once:
+The `cb-collection-sort` controller (drag-and-drop reordering of collection
+fields) depends on [SortableJS](https://github.com/SortableJS/Sortable). Pin it
+in your importmap once:
 
 ```bash
 php bin/console importmap:require sortablejs
@@ -91,27 +88,7 @@ php bin/console importmap:require sortablejs
 
 Then re-run `php bin/console asset-map:compile` (or your normal asset build).
 
-**With Webpack Encore**, link each package's `assets/` directory as a local npm
-package (the pattern Symfony UX uses for `@symfony/ux-live-component`), then
-enable the Stimulus bridge on the build that serves your admin:
-
-```bash
-npm install --save "@klehm/content-blocks@file:vendor/klehm/content-blocks/assets"
-npm install --save "@klehm/content-blocks-kit@file:vendor/klehm/content-blocks-kit/assets"
-npm install --save sortablejs
-```
-
-```js
-// webpack.config.js
-Encore.enableStimulusBridge('./assets/controllers.json');
-```
-
-The admin entry must start a Stimulus application (`startStimulusApp` in a
-`bootstrap.js`) — worth checking if you are bolting the builder onto an older,
-jQuery-based back office. Full walkthrough:
-[Installation → With Webpack Encore](https://klehm.github.io/content-blocks-project/guide/installation#with-webpack-encore).
-
-The `autoimport` block on `cb-builder-launcher` pulls in `admin.css` (styles for the launcher button, builder dialog and sidebars). You do **not** need to add `import '@klehm/content-blocks/styles/admin.css'` in `app.js` — the entry above handles it, under either bundler.
+The `autoimport` block on `cb-builder-launcher` pulls in `admin.css` (styles for the launcher button, builder dialog and sidebars). You do **not** need to add `import '@klehm/content-blocks/styles/admin.css'` in `app.js` — Stimulus Bundle handles it once the entry above is in place.
 
 > A Symfony Flex recipe that injects this whole block automatically is on the roadmap — once published, this manual step goes away.
 
@@ -360,7 +337,7 @@ MIME-whitelisted):
 # config/packages/content_blocks.yaml
 content_blocks:
     upload:
-        directory: '%kernel.project_dir%/public/uploads/content-blocks'
+        dir: '%kernel.project_dir%/public/uploads/content-blocks'
         public_prefix: '/uploads/content-blocks'
         # max_size: 10485760                       # bytes, default 10 MB
         # allowed_mime_types: ['image/jpeg', ...]  # default: common images + PDF
@@ -382,78 +359,6 @@ use ContentBlocks\Form\Type\ImageUploadType;
 
 $builder->add('src', ImageUploadType::class);
 ```
-
-## Content versioning (`content_blocks.content_version`)
-
-The shape of what a block stores is decided by its **block type** — yours, or the kit's — not by this package. So the schema generation of your content is yours to declare:
-
-```yaml
-# config/packages/content_blocks.yaml
-content_blocks:
-    content_version: 1   # bump when anything that shapes your block data changes
-```
-
-Bump it whenever your own blocks change their stored keys, when a kit upgrade renames some, or when a core upgrade note says so. As content is written, the current value is stamped onto `cb_content_area.content_version` (and onto `cb_section_template.content_version` when a snapshot is saved), so a later migration can find what predates the change:
-
-```sql
-SELECT id FROM cb_content_area WHERE content_version < 2 OR content_version IS NULL;
-```
-
-::: warning What the number means — and does not
-It records the version the area was last **written** under, not that every block in it conforms. Editing a single block re-stamps the whole area while its other blocks keep whatever shape they had — so **run your migration before letting editors work on the new version**, otherwise they quietly remove areas from your own `WHERE content_version < N`.
-
-A section template has no such caveat: a snapshot is frozen, so its stamp keeps describing its payload.
-
-`NULL` means "predates versioning" — decide explicitly what to do with those rows; it is not the same as `0`.
-:::
-
-An export payload carries the emitting app's `contentVersion` too, but purely for information: a version number means something only inside the installation that issued it, so importing stamps the target with your **local** version instead.
-
-### Deciding what happens to older content
-
-Section templates are the one place where a stored version is comparable — the number came from this same installation. What to do about a mismatch is yours to decide, through `ContentVersionUpgraderInterface`:
-
-```php
-use ContentBlocks\Versioning\ContentVersionUpgraderInterface;
-
-final class MyUpgrader implements ContentVersionUpgraderInterface
-{
-    public function supports(?int $stored, int $current): bool
-    {
-        return $stored === null || $stored >= 2;   // cheap: drives the picker
-    }
-
-    public function upgrade(array $payload, ?int $stored, int $current): array
-    {
-        if ($stored === 2) {
-            $payload = $this->renameSubtitleToKicker($payload);
-        }
-
-        return $payload;   // transient — the stored row is never rewritten
-    }
-}
-```
-
-```yaml
-# config/services.yaml
-ContentBlocks\Versioning\ContentVersionUpgraderInterface: '@App\ContentBlocks\MyUpgrader'
-```
-
-`supports()` is called once per row when listing the library, so the picker greys out what you refuse instead of letting an editor click into an error; `upgrade()` runs only on the way in. Upgrading is **transient**: what you return is instantiated, the template row is untouched. Rewriting it for good is a migration, and stays your call.
-
-The shipped default, `DenyOnMismatchUpgrader`, refuses a **known** mismatch and accepts `null`. That asymmetry is deliberate: every row written before versioning existed carries `null`, and refusing those would make your whole library unusable the day you upgrade.
-
-Import does not consult this seam — a payload's version belongs to the app that exported it. If you control both ends of a transfer and want to gate it, decorate `ContentAreaImporterInterface`.
-
-### The other half: the envelope
-
-There are two schemas in a stored payload, with two owners. The **content** inside it is shaped by the block types, so migrating it is yours (above). The **envelope** around it — `{format, contentArea: {sections: […]}, assets}` for a transfer, `{format, layout, settings, columns}` for a section template — belongs to this package, so migrating it is ours.
-
-When a release changes that structure, it ships an `EnvelopeUpgraderInterface` step alongside; `EnvelopeUpgradeChain` walks a stored payload from the format it declares to the one the code reads, and your old templates and export files keep working. Nothing to do on your side.
-
-You can add your own step (it is autoconfigured — just implement the interface) if you invented a format of your own, but the normal case is that this is invisible to you.
-
-📖 Full walkthrough, including a complete migration and the order to deploy it in: [Content versioning](https://klehm.github.io/content-blocks-project/guide/content-versioning).
 
 ## Styling sections and blocks
 
@@ -485,18 +390,18 @@ Presets are named styles offered in the section sidebar. Each carries a CSS clas
 
 ```yaml
 content_blocks:
-    section_styles:
+    styles:
         - name: boxed
           label: 'Boxed'
           css_class: 'my-section--boxed'
           settings:
               styling:
                   backgroundColor: '#f1f5f9'
-                  padding: { desktop: { top: 40, right: 40, bottom: 40, left: 40 } }
+                  padding: { d: { top: 40, right: 40, bottom: 40, left: 40 } }
         - name: airy            # settings-only preset (no class)
           label: 'Airy'
           settings:
-              styling: { padding: { desktop: { top: 96, bottom: 96 } } }
+              styling: { padding: { d: { top: 96, bottom: 96 } } }
 ```
 
 …or implement `ContentBlocks\Section\SectionStyleProviderInterface` and return `SectionStyle` instances (the fourth constructor arg is the settings array).
@@ -539,72 +444,9 @@ final class ZIndexExtension extends AbstractTypeExtension
 
 Pair it with a `SectionDecoratorInterface` reading `$settings['styling']['zIndex']` to emit the style. (For curated background colors, prefer the built-in `palette` config above.)
 
-### Adding a field to a block's edit form
-
-Every block is edited through one shared form type (`BlockFormType`), so a stock Symfony `FormTypeExtension` can't be scoped to a single block — it fires for all of them. Use the **block form extension** seam instead: declare which block type ids it targets (or `'*'` global) and add fields to their edit form.
-
-```php
-use ContentBlocks\Form\Extension\AsBlockFormExtension;
-use ContentBlocks\Form\Extension\BlockFormExtensionInterface;
-use Symfony\Component\Form\Extension\Core\Type\TextType;
-use Symfony\Component\Form\FormBuilderInterface;
-
-#[AsBlockFormExtension('button')]          // one type
-// #[AsBlockFormExtension(['button', 'card'])]  // several
-// #[AsBlockFormExtension]                       // every block (global)
-final class ButtonRelExtension implements BlockFormExtensionInterface
-{
-    public function buildForm(FormBuilderInterface $builder, array $data, string $blockType): void
-    {
-        $builder->add('rel', TextType::class, ['required' => false, 'data' => $data['rel'] ?? '']);
-    }
-}
-```
-
-Auto-tagged with `content_blocks.block_form_extension` (autoconfigured); `BlockFormType` calls every matching extension after the block's own `buildForm()`, in `priority` order (`#[AsBlockFormExtension('button', priority: 10)]` — higher first). Keyed by block type **id**, so it survives block subclassing. The added field round-trips into `Block.data` like any other (block data is not pruned); render it via a host block-template override. Add `'attr' => ['data-cb-group' => 'SEO']` to the field to give it its own tab in the block sidebar.
-
-For a **global** extension, pair it with a block decorator (next section) rather than overriding every template: the decorator turns the stored key into a class / attribute / inline style for every block at once.
-
-The builder is the block's own, so the seam is not add-only: `$builder->remove('fullWidth')` drops a field (its stored value is frozen rather than deleted, and a POST still carrying it is ignored), and re-adding child builders (`$b->add($b->get('url'))`) reorders the form — children render in insertion order, and the "Style" tab is always appended last. All four patterns are wired in the sandboxes — see `apps/content-blocks-sandbox/src/ContentBlocks/` — and detailed in the *Add a field to a block* recipe in the docs.
-
 ### Adding your own block decorator
 
 Implement `ContentBlocks\Block\BlockDecoratorInterface` (mirror of `SectionDecoratorInterface`). It is auto-tagged with `content_blocks.block_decorator` when `autoconfigure: true` is on, and called for every block being rendered. Return a `BlockDecoration` (classes / inline styles / attributes) — the bundle merges all decorators' output into the block's outer `<div>`.
-
-### Replacing or decorating a core service
-
-The services that carry the builder's core behaviour are each registered as a concrete class **aliased to an interface**, and every consumer type-hints the interface. To change one, alias it to your own implementation — or, more often, decorate the shipped one:
-
-| Interface | Default | Responsibility |
-|---|---|---|
-| `Rendering\BlockRendererInterface` | `BlockRenderer` | renders an area / section / block to HTML |
-| `Publishing\ContentAreaPublisherInterface` | `ContentAreaPublisher` | publishes or discards the draft state |
-| `Section\SectionClonerInterface` | `SectionCloner` | deep-clones a section (duplicate + replace flows) |
-| `Transfer\ContentAreaExporterInterface` | `ContentAreaExporter` | area → self-contained JSON payload |
-| `Transfer\ContentAreaImporterInterface` | `ContentAreaImporter` | JSON payload → draft sections |
-| `SectionTemplate\SectionTemplateSerializerInterface` | `SectionTemplateSerializer` | section → reusable library snapshot |
-| `SectionTemplate\SectionTemplateInstantiatorInterface` | `SectionTemplateInstantiator` | snapshot → detached draft section |
-
-```php
-use ContentBlocks\Publishing\ContentAreaPublisherInterface;
-use Symfony\Component\DependencyInjection\Attribute\AsDecorator;
-
-#[AsDecorator(ContentAreaPublisherInterface::class)]
-final class AuditedPublisher implements ContentAreaPublisherInterface
-{
-    public function __construct(private readonly ContentAreaPublisherInterface $inner) {}
-
-    public function publish(ContentArea $area): void
-    {
-        $this->inner->publish($area);
-        // … your audit trail, cache invalidation, webhook …
-    }
-
-    public function discardDraft(ContentArea $area): void { $this->inner->discardDraft($area); }
-}
-```
-
-One contract to keep in mind when replacing rather than decorating: `publish()` / `discardDraft()` **flush** the EntityManager — they are the terminal operations of the draft lifecycle. The services that *build* rather than commit (cloner, importer, instantiator) leave the flush to their caller.
 
 ## Customizing default values
 

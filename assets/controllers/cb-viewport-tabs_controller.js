@@ -13,7 +13,7 @@ import { Controller } from '@hotwired/stimulus';
  */
 export default class extends Controller {
     static targets = ['tab'];
-    static values = { active: { type: String, default: 'desktop' } };
+    static values = { active: { type: String, default: 'd' } };
 
     connect() {
         this._show(this.activeValue);

@@ -2,14 +2,14 @@
 
 declare(strict_types=1);
 
-namespace ContentBlocks\Tests\Transfer;
+namespace ContentBlocks\Tests\Service;
 
 use ContentBlocks\Asset\AssetResolverInterface;
 use ContentBlocks\Entity\Block;
 use ContentBlocks\Entity\Column;
 use ContentBlocks\Entity\ContentArea;
 use ContentBlocks\Entity\Section;
-use ContentBlocks\Transfer\ContentAreaExporter;
+use ContentBlocks\Service\ContentAreaExporter;
 use PHPUnit\Framework\TestCase;
 
 final class ContentAreaExporterTest extends TestCase
@@ -87,7 +87,6 @@ final class ContentAreaExporterTest extends TestCase
         $payload = (new ContentAreaExporter($this->makeResolver()))->export($area);
 
         $this->assertSame(ContentAreaExporter::FORMAT, $payload['format']);
-        $this->assertSame(1, $payload['contentVersion'], 'default when the host configures none');
         $this->assertArrayHasKey('exportedAt', $payload);
         $sections = $payload['contentArea']['sections'];
         $this->assertCount(1, $sections);

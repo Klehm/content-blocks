@@ -2,18 +2,32 @@
 
 declare(strict_types=1);
 
-namespace ContentBlocks\SectionTemplate;
+namespace ContentBlocks\Service;
 
 use ContentBlocks\Entity\Block;
 use ContentBlocks\Entity\Column;
 use ContentBlocks\Entity\Section;
 
 /**
- * Default {@see SectionTemplateSerializerInterface} — see it for the contract.
+ * Snapshots a single Section (layout + settings + columns + blocks + data)
+ * into a self-contained array suitable for JSON storage in a SectionTemplate.
+ *
+ * Unlike ContentAreaExporter, asset references are left as plain storage paths:
+ * the section-template library lives inside one app, so embedding binaries
+ * would needlessly bloat every template. Draft state takes precedence over
+ * published state (same convention as SectionCloner / the rest of the builder).
+ *
+ * Alongside the payload it collects the distinct block-type identifiers used,
+ * so the library can flag incompatible templates cheaply.
  */
-final class SectionTemplateSerializer implements SectionTemplateSerializerInterface
+final class SectionTemplateSerializer
 {
-    public function serialize(Section $section): SectionTemplateSnapshot
+    public const FORMAT = 'content-blocks/section-v1';
+
+    /**
+     * @return array{payload: array<string, mixed>, blockTypes: list<string>}
+     */
+    public function serialize(Section $section): array
     {
         $blockTypes = [];
         $settings = $section->getDraftSettings() ?? $section->getPublishedSettings();
@@ -30,7 +44,10 @@ final class SectionTemplateSerializer implements SectionTemplateSerializerInterf
             'columns' => $columns,
         ];
 
-        return new SectionTemplateSnapshot($payload, array_values(array_unique($blockTypes)));
+        return [
+            'payload' => $payload,
+            'blockTypes' => array_values(array_unique($blockTypes)),
+        ];
     }
 
     /**

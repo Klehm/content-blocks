@@ -11,15 +11,8 @@ use ContentBlocks\Entity\Section;
 use Doctrine\ORM\Event\OnFlushEventArgs;
 
 /**
- * Touches ContentArea::updatedAt — and stamps ContentArea::contentVersion —
- * whenever a child Section / Column / Block is inserted, updated, or removed in
- * the same flush.
- *
- * On the version: it records the schema generation the content was **written**
- * under, which is a targeting index for host migrations, not a conformance
- * claim. Editing one block re-stamps the whole area while its other blocks keep
- * whatever shape they had — so migrate before letting editors work on a new
- * version. See ContentArea::$contentVersion and the upgrade guide.
+ * Touches ContentArea::updatedAt whenever a child Section / Column / Block is
+ * inserted, updated, or removed in the same flush.
  *
  * ContentArea itself rarely gets its own field mutated (the entity only has
  * id + the children collection), so a @PreUpdate on ContentArea would never
@@ -32,11 +25,6 @@ use Doctrine\ORM\Event\OnFlushEventArgs;
  */
 final class ContentAreaTouchListener
 {
-    public function __construct(
-        private readonly int $contentVersion = 1,
-    ) {
-    }
-
     public function onFlush(OnFlushEventArgs $args): void
     {
         $em = $args->getObjectManager();
@@ -77,7 +65,6 @@ final class ContentAreaTouchListener
             }
 
             $area->setUpdatedAt($now);
-            $area->setContentVersion($this->contentVersion);
             // ContentArea may not be in any change-tracking list yet (a child
             // change doesn't put the parent in scheduled updates by itself).
             // recomputeSingleEntityChangeSet picks up the new updatedAt so
