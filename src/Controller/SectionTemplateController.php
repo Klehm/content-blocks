@@ -11,9 +11,13 @@ use ContentBlocks\Entity\SectionTemplate;
 use ContentBlocks\Security\AccessCheckerInterface;
 use ContentBlocks\Security\ContentBlocksAccessDeniedException;
 use ContentBlocks\SectionTemplate\IncompatibleTemplateException;
+use ContentBlocks\SectionTemplate\SectionTemplateInstantiatorInterface;
 use ContentBlocks\SectionTemplate\SectionTemplateManagerInterface;
-use ContentBlocks\Service\SectionTemplateInstantiator;
-use ContentBlocks\Service\SectionTemplateSerializer;
+use ContentBlocks\SectionTemplate\SectionTemplateSerializerInterface;
+use ContentBlocks\SectionTemplate\UnsupportedTemplateFormatException;
+use ContentBlocks\Versioning\ContentVersionUpgraderInterface;
+use ContentBlocks\Versioning\EnvelopeUpgradeChain;
+use ContentBlocks\Versioning\IncompatibleContentVersionException;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -54,10 +58,13 @@ final class SectionTemplateController
         private readonly EntityManagerInterface $em,
         private readonly AccessCheckerInterface $accessChecker,
         private readonly SectionTemplateManagerInterface $templateManager,
-        private readonly SectionTemplateSerializer $serializer,
-        private readonly SectionTemplateInstantiator $instantiator,
+        private readonly SectionTemplateSerializerInterface $serializer,
+        private readonly SectionTemplateInstantiatorInterface $instantiator,
         private readonly BlockTypeRegistry $blockTypeRegistry,
         private readonly CsrfTokenManagerInterface $csrfTokenManager,
+        private readonly ContentVersionUpgraderInterface $versionUpgrader,
+        private readonly EnvelopeUpgradeChain $envelopes = new EnvelopeUpgradeChain(),
+        private readonly int $contentVersion = 1,
     ) {
     }
 
@@ -97,12 +104,15 @@ final class SectionTemplateController
             return new JsonResponse(['error' => 'A template name is required'], Response::HTTP_BAD_REQUEST);
         }
 
-        $serialized = $this->serializer->serialize($section);
+        $snapshot = $this->serializer->serialize($section);
 
         $template = (new SectionTemplate())
             ->setName($name)
-            ->setPayload($serialized['payload'])
-            ->setBlockTypes($serialized['blockTypes']);
+            ->setPayload($snapshot->payload)
+            ->setBlockTypes($snapshot->blockTypes)
+            // A snapshot is frozen, so unlike an area's, this stamp keeps
+            // describing its payload for as long as the row lives.
+            ->setContentVersion($this->contentVersion);
 
         $this->em->persist($template);
         $this->em->flush();
@@ -111,10 +121,14 @@ final class SectionTemplateController
     }
 
     /**
-     * Paginated, name-filtered list of library templates. Each entry carries a
-     * `compatible` flag (and the offending `missingTypes`) computed against the
-     * current registry, so the UI can disable incompatible templates up front
-     * rather than failing on insert.
+     * Paginated, name-filtered list of library templates. Each entry is scored
+     * against the current registry so the picker can warn (or refuse) up front
+     * rather than surprising the editor on insert:
+     *  - `skippedTypes` — block types this build no longer has. The template is
+     *    still insertable, minus those blocks; the UI says so before the click.
+     *  - `insertable` — false only when nothing would come in: an unreadable
+     *    payload envelope, every one of its block types gone, or a schema
+     *    generation the ContentVersionUpgrader will not accept.
      */
     #[Route(
         '/area/{id}/section-templates',
@@ -157,11 +171,17 @@ final class SectionTemplateController
         $items = [];
         foreach ($rows as $template) {
             $missing = $this->missingTypes($template);
+            $readable = $this->hasReadableFormat($template);
+            $declared = $template->getBlockTypes();
+            $allGone = $declared !== [] && \count($missing) === \count($declared);
+            $versionOk = $this->versionUpgrader->supports($template->getContentVersion(), $this->contentVersion);
             $items[] = [
                 'id' => $template->getId(),
                 'name' => $template->getName(),
-                'compatible' => $missing === [],
-                'missingTypes' => $missing,
+                'insertable' => $readable && !$allGone && $versionOk,
+                'skippedTypes' => $missing,
+                'unreadableFormat' => !$readable,
+                'staleVersion' => !$versionOk,
                 'canManage' => $this->templateManager->canManage(),
                 'createdAt' => $template->getCreatedAt()->format(\DateTimeInterface::ATOM),
             ];
@@ -176,8 +196,9 @@ final class SectionTemplateController
 
     /**
      * Instantiates a template into the target area as a new draft section
-     * appended at the end. Unknown block types abort with 422; unknown data
-     * fields only warn (returned in `warnings`, never blocking the insert).
+     * appended at the end. Blocks whose type is gone are skipped and reported;
+     * the insert only aborts with 422 when nothing survives, or when the
+     * payload envelope is unreadable.
      */
     #[Route(
         '/area/{id}/insert-template/{templateId}',
@@ -205,11 +226,34 @@ final class SectionTemplateController
         }
 
         try {
-            $result = $this->instantiator->instantiate($template->getPayload());
+            // Upgrading is transient: what comes back is instantiated, never
+            // written back to the row. A permanent rewrite is a migration.
+            $payload = $this->versionUpgrader->upgrade(
+                $template->getPayload(),
+                $template->getContentVersion(),
+                $this->contentVersion,
+            );
+            $result = $this->instantiator->instantiate($payload);
+        } catch (IncompatibleContentVersionException $e) {
+            // Backstop: list() already rules these out, so reaching here means
+            // a stale picker or a hand-crafted request.
+            return new JsonResponse([
+                'error' => 'incompatible_content_version',
+                'storedVersion' => $e->getStoredVersion(),
+                'currentVersion' => $e->getCurrentVersion(),
+            ], Response::HTTP_UNPROCESSABLE_ENTITY);
         } catch (IncompatibleTemplateException $e) {
             return new JsonResponse([
                 'error' => 'incompatible_template',
                 'missingTypes' => $e->getMissingTypes(),
+            ], Response::HTTP_UNPROCESSABLE_ENTITY);
+        } catch (UnsupportedTemplateFormatException $e) {
+            // Backstop: list() already greys these out, so reaching here means a
+            // stale picker or a hand-crafted request.
+            return new JsonResponse([
+                'error' => 'unsupported_template_format',
+                'found' => $e->getFound(),
+                'expected' => $e->getExpected(),
             ], Response::HTTP_UNPROCESSABLE_ENTITY);
         }
 
@@ -221,7 +265,9 @@ final class SectionTemplateController
 
         return new JsonResponse([
             'sectionId' => $section->getId(),
-            'warnings' => $result->warnings,
+            'skippedBlockCount' => $result->skippedBlockCount,
+            'skippedBlockTypes' => $result->skippedBlockTypes,
+            'unknownFields' => $result->unknownFields,
         ]);
     }
 
@@ -293,6 +339,23 @@ final class SectionTemplateController
             $template->getBlockTypes(),
             fn (string $type) => !$this->blockTypeRegistry->has($type),
         ));
+    }
+
+    /**
+     * Whether the stored payload's envelope is one this build can read. Checked
+     * here as well as in the instantiator so the picker greys the row out up
+     * front instead of letting the editor click into a 422 — same treatment as
+     * a missing block type.
+     */
+    private function hasReadableFormat(SectionTemplate $template): bool
+    {
+        $format = $template->getPayload()['format'] ?? null;
+
+        // "Readable" includes formats the envelope chain can migrate forward,
+        // not just today's — otherwise a format bump would grey out the whole
+        // library even where a step exists to bridge it.
+        return is_string($format)
+            && $this->envelopes->supports($format, SectionTemplateSerializerInterface::FORMAT);
     }
 
     private function readName(Request $request): ?string
