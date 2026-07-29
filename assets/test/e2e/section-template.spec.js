@@ -114,6 +114,203 @@ test.describe('section-template library — round trip', () => {
         await expect(picker).toBeHidden();
         await expect.poll(() => targetFrame.locator('[data-cb-section-id]').count()).toBe(2);
     });
+
+    test('a block carrying styling and a host extension field inserts without warnings', async ({ page }) => {
+        // Regression guard. The instantiator flags stored keys that nothing in
+        // the block's current shape can hold. Reading getDefaultData() alone
+        // made it flag `styling` (added by BlockFormType, deliberately absent
+        // from getDefaultData) and every field a host BlockFormExtension
+        // contributes — here the sandbox's global `anchorId`.
+        //
+        // Since a warning now keeps the picker open on its status line, "the
+        // picker closed" *is* the assertion "no field was wrongly flagged".
+        const templateName = `Tpl ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+        const sourceUrl = await createFreshPage(page);
+        const sourceFrame = await openBuilder(page, sourceUrl);
+        await addFullSection(page, sourceFrame);
+        await addFirstBlock(page, sourceFrame);
+
+        // Editing the block persists the whole form — the block's own fields,
+        // the `styling` sub-tree and the extension's `anchorId`.
+        await page.locator('.cb-shell__iframe').evaluate((iframe) => {
+            iframe.contentDocument.querySelector('[data-cb-block-id]')?.dispatchEvent(
+                new MouseEvent('click', { bubbles: true, cancelable: true }),
+            );
+        });
+        const sidebar = page.locator('aside[data-cb-builder-target="sidebar"]');
+        await expect(sidebar.locator('.cb-block__edit-form')).toBeVisible();
+        await page.waitForTimeout(300); // let cb-autosave connect
+        await sidebar.locator('.cb-block__tab', { hasText: 'SEO' }).click();
+        await sidebar.locator('[name$="[anchorId]"]').fill('tpl-anchor');
+        await sidebar.locator('[name$="[anchorId]"]').blur();
+        await page.waitForTimeout(1200); // autosave debounce + round-trip
+
+        await saveFirstSectionAsTemplate(page, sourceFrame, templateName);
+        await page.locator('.cb-shell__close').click();
+
+        const targetUrl = await createFreshPage(page);
+        const targetFrame = await openBuilder(page, targetUrl);
+        await page.locator('.cb-sidebar-empty__library').click();
+        const picker = page.locator('.cb-template-picker');
+        await expect(picker).toBeVisible();
+        await picker.locator('.cb-template-picker__search').fill(templateName);
+        await expect.poll(() => picker.locator('.cb-template-picker__item-btn').count()).toBe(1);
+        await picker.locator('.cb-template-picker__item-btn').first().click();
+
+        await expect(picker).toBeHidden();
+        await expect(page.locator('.cb-template-picker__status')).toHaveText('');
+        await expect.poll(() => targetFrame.locator('[data-cb-section-id]').count()).toBe(1);
+        // The extension field survived the snapshot round-trip.
+        await expect(targetFrame.locator('#tpl-anchor')).toHaveCount(1);
+    });
+});
+
+/**
+ * Stages a library entry directly, bypassing the save endpoint — the only way to
+ * get a payload this build cannot fully use, since saving snapshots real,
+ * registered blocks. Backed by the sandbox's debug-only fixture route.
+ */
+async function stageTemplate(page, { name, blocks, blockTypes, format = 'content-blocks/section-v1', contentVersion = null }) {
+    const response = await page.request.post('/test-fixtures/section-template', {
+        data: {
+            name,
+            blockTypes,
+            contentVersion,
+            payload: {
+                format,
+                layout: 'full',
+                settings: null,
+                columns: [{ preset: 'col-12', blocks }],
+            },
+        },
+    });
+    if (!response.ok()) throw new Error(`Fixture route failed: ${response.status()}`);
+}
+
+async function openLibraryOn(page, url) {
+    const frame = await openBuilder(page, url);
+    await page.locator('.cb-sidebar-empty__library').click();
+    const picker = page.locator('.cb-template-picker');
+    await expect(picker).toBeVisible();
+
+    return { frame, picker };
+}
+
+test.describe('section-template library — partially usable templates', () => {
+    test('a template with a gone block type stays insertable, minus that block', async ({ page }) => {
+        const name = `Tpl ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        await stageTemplate(page, {
+            name,
+            blockTypes: ['title', 'countdown'],
+            blocks: [
+                { type: 'title', data: { text: 'Kept heading', level: 2 } },
+                { type: 'countdown', data: { ends: 'never' } },
+            ],
+        });
+
+        const { frame, picker } = await openLibraryOn(page, await createFreshPage(page));
+        await picker.locator('.cb-template-picker__search').fill(name);
+        await expect.poll(() => picker.locator('.cb-template-picker__item-btn').count()).toBe(1);
+
+        // Warned before the click, not blocked: one type is gone, one remains.
+        const row = picker.locator('.cb-template-picker__item').first();
+        const btn = row.locator('.cb-template-picker__item-btn');
+        await expect(btn).toBeEnabled();
+        await expect(row).toHaveClass(/cb-template-picker__item--partial/);
+        await expect(btn).toHaveAttribute('title', /countdown/);
+
+        await btn.click();
+
+        // The section came in with only the usable block, and the picker stayed
+        // open to report what was skipped.
+        await expect.poll(() => frame.locator('[data-cb-section-id]').count()).toBe(1);
+        await expect.poll(() => frame.locator('[data-cb-block-id]').count()).toBe(1);
+        await expect(frame.locator('[data-cb-block-type="title"]')).toHaveCount(1);
+        await expect(picker).toBeVisible();
+        await expect(page.locator('.cb-template-picker__status')).toContainText('countdown');
+    });
+
+    test('a template whose block types are all gone cannot be inserted', async ({ page }) => {
+        const name = `Tpl ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        await stageTemplate(page, {
+            name,
+            blockTypes: ['countdown'],
+            blocks: [{ type: 'countdown', data: {} }],
+        });
+
+        const { picker } = await openLibraryOn(page, await createFreshPage(page));
+        await picker.locator('.cb-template-picker__search').fill(name);
+        await expect.poll(() => picker.locator('.cb-template-picker__item-btn').count()).toBe(1);
+
+        const row = picker.locator('.cb-template-picker__item').first();
+        await expect(row.locator('.cb-template-picker__item-btn')).toBeDisabled();
+        await expect(row).toHaveClass(/cb-template-picker__item--disabled/);
+        await expect(row.locator('.cb-template-picker__item-btn')).toHaveAttribute('title', /countdown/);
+    });
+
+    test('a template from an older content generation cannot be inserted', async ({ page }) => {
+        // The sandbox runs content_version 1 (the default), so a snapshot
+        // stamped 0… is impossible (min is 1) — stage one at 2, i.e. content
+        // written by a deploy that has since been rolled back. Either way the
+        // generations differ and DenyOnMismatchUpgrader refuses.
+        const name = `Tpl ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        await stageTemplate(page, {
+            name,
+            blockTypes: ['title'],
+            blocks: [{ type: 'title', data: { text: 'From another generation', size: 'h2', tag: 'h2', color: '' } }],
+            contentVersion: 2,
+        });
+
+        const { picker } = await openLibraryOn(page, await createFreshPage(page));
+        await picker.locator('.cb-template-picker__search').fill(name);
+        await expect.poll(() => picker.locator('.cb-template-picker__item-btn').count()).toBe(1);
+
+        const btn = picker.locator('.cb-template-picker__item-btn').first();
+        await expect(btn).toBeDisabled();
+        await expect(btn).toHaveAttribute('title', /schéma de contenu|content schema/i);
+    });
+
+    test('a template that predates versioning is still insertable', async ({ page }) => {
+        // Every row written before versioning existed carries null. Refusing
+        // those would make an upgrading host's whole library unusable.
+        const name = `Tpl ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        await stageTemplate(page, {
+            name,
+            blockTypes: ['title'],
+            blocks: [{ type: 'title', data: { text: 'Legacy but fine', size: 'h2', tag: 'h2', color: '' } }],
+            contentVersion: null,
+        });
+
+        const { frame, picker } = await openLibraryOn(page, await createFreshPage(page));
+        await picker.locator('.cb-template-picker__search').fill(name);
+        await expect.poll(() => picker.locator('.cb-template-picker__item-btn').count()).toBe(1);
+        await picker.locator('.cb-template-picker__item-btn').first().click();
+
+        await expect(picker).toBeHidden();
+        await expect.poll(() => frame.locator('[data-cb-block-id]').count()).toBe(1);
+    });
+
+    test('a template saved under an unreadable envelope cannot be inserted', async ({ page }) => {
+        const name = `Tpl ${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        await stageTemplate(page, {
+            name,
+            blockTypes: ['title'],
+            blocks: [{ type: 'title', data: { text: 'Fine block', level: 2 } }],
+            format: 'content-blocks/section-v99',
+        });
+
+        const { picker } = await openLibraryOn(page, await createFreshPage(page));
+        await picker.locator('.cb-template-picker__search').fill(name);
+        await expect.poll(() => picker.locator('.cb-template-picker__item-btn').count()).toBe(1);
+
+        // Its block type is perfectly fine — it's the payload structure that
+        // this build cannot read, and the tooltip must say so rather than
+        // blaming a block type.
+        const btn = picker.locator('.cb-template-picker__item-btn').first();
+        await expect(btn).toBeDisabled();
+        await expect(btn).not.toHaveAttribute('title', /title/);
+    });
 });
 
 test.describe('section-template library — management', () => {

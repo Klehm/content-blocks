@@ -11,8 +11,11 @@ use ContentBlocks\Security\ContentBlocksAccessDeniedException;
 use ContentBlocks\SectionTemplate\AllowAllSectionTemplateManager;
 use ContentBlocks\SectionTemplate\DenyAllSectionTemplateManager;
 use ContentBlocks\SectionTemplate\SectionTemplateManagerInterface;
-use ContentBlocks\Service\SectionTemplateInstantiator;
-use ContentBlocks\Service\SectionTemplateSerializer;
+use ContentBlocks\SectionTemplate\SectionTemplateInstantiator;
+use ContentBlocks\SectionTemplate\SectionTemplateSerializer;
+use ContentBlocks\Versioning\ContentVersionUpgraderInterface;
+use ContentBlocks\Versioning\DenyOnMismatchUpgrader;
+use ContentBlocks\Versioning\EnvelopeUpgradeChain;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Component\HttpFoundation\Response;
 
@@ -29,15 +32,19 @@ final class SectionTemplateControllerTest extends ControllerTestCase
         bool $csrfValid = true,
         ?AccessCheckerInterface $accessChecker = null,
         ?SectionTemplateManagerInterface $manager = null,
+        ?ContentVersionUpgraderInterface $upgrader = null,
     ): SectionTemplateController {
         return new SectionTemplateController(
             $em,
             $accessChecker ?? $this->makeAccessChecker(),
             $manager ?? new AllowAllSectionTemplateManager(),
             new SectionTemplateSerializer(),
-            new SectionTemplateInstantiator($this->makeRegistry()),
+            new SectionTemplateInstantiator($this->makeRegistry(), $this->makeDataKeys()),
             $this->makeRegistry(),
             $this->makeCsrfManager($csrfValid),
+            $upgrader ?? new DenyOnMismatchUpgrader(),
+            new EnvelopeUpgradeChain(),
+            5,
         );
     }
 
@@ -83,6 +90,8 @@ final class SectionTemplateControllerTest extends ControllerTestCase
         $this->assertSame('My hero', $template->getName(), 'name is trimmed');
         $this->assertSame(['fake'], $template->getBlockTypes());
         $this->assertSame('two_cols', $template->getPayload()['layout']);
+        // A snapshot is frozen, so its stamp keeps describing its payload.
+        $this->assertSame(5, $template->getContentVersion());
         $this->assertSame(1, $this->flushCount);
     }
 
@@ -144,20 +153,108 @@ final class SectionTemplateControllerTest extends ControllerTestCase
 
         $this->assertSame(Response::HTTP_OK, $response->getStatusCode());
         $payload = json_decode((string) $response->getContent(), true);
-        $this->assertSame([], $payload['warnings']);
+        $this->assertSame(0, $payload['skippedBlockCount']);
+        $this->assertSame([], $payload['unknownFields']);
         $this->assertCount(1, $this->persisted);
         // Appended after the existing section (previewPosition 3 -> 4).
         $this->assertSame(4, $this->persisted[0]->getPreviewPosition());
         $this->assertCount(2, $area->getSections());
     }
 
-    public function testInsertRejectsIncompatibleTemplateWith422(): void
+    public function testInsertSkipsGoneBlockTypesAndInsertsTheRest(): void
     {
         $area = $this->makeArea(1);
         $template = $this->makeTemplate(7, $this->payloadWith([
             ['type' => 'fake', 'data' => []],
             ['type' => 'ghost', 'data' => []],
         ]), ['fake', 'ghost']);
+
+        $controller = $this->makeController($this->makeEm([$area, $template]));
+
+        $response = $controller->insert(1, 7, $this->makeJsonRequest());
+
+        $this->assertSame(Response::HTTP_OK, $response->getStatusCode());
+        $payload = json_decode((string) $response->getContent(), true);
+        $this->assertSame(1, $payload['skippedBlockCount']);
+        $this->assertSame(['ghost'], $payload['skippedBlockTypes']);
+        $this->assertCount(1, $this->persisted);
+    }
+
+    public function testInsertRejectsAStaleContentVersionWith422(): void
+    {
+        $area = $this->makeArea(1);
+        $template = $this->makeTemplate(7, $this->payloadWith([
+            ['type' => 'fake', 'data' => ['content' => 'x']],
+        ]), ['fake']);
+        // Controller runs generation 5; this snapshot was taken under 3.
+        $template->setContentVersion(3);
+
+        $controller = $this->makeController($this->makeEm([$area, $template]));
+
+        $response = $controller->insert(1, 7, $this->makeJsonRequest());
+
+        $this->assertSame(Response::HTTP_UNPROCESSABLE_ENTITY, $response->getStatusCode());
+        $payload = json_decode((string) $response->getContent(), true);
+        $this->assertSame('incompatible_content_version', $payload['error']);
+        $this->assertSame(3, $payload['storedVersion']);
+        $this->assertSame(5, $payload['currentVersion']);
+        $this->assertCount(0, $this->persisted);
+    }
+
+    public function testAHostUpgraderCanMigrateThePayloadOnRead(): void
+    {
+        // The whole point of the seam: the host knows what changed between its
+        // own generations, so it can rewrite the payload on the way in. The
+        // rewrite is transient — the stored row is untouched.
+        $area = $this->makeArea(1);
+        $stored = $this->payloadWith([['type' => 'fake', 'data' => ['legacyContent' => 'hello']]]);
+        $template = $this->makeTemplate(7, $stored, ['fake']);
+        $template->setContentVersion(3);
+
+        $upgrader = new class implements ContentVersionUpgraderInterface {
+            public function supports(?int $stored, int $current): bool
+            {
+                return true;
+            }
+
+            public function upgrade(array $payload, ?int $stored, int $current): array
+            {
+                foreach ($payload['columns'] as $c => $column) {
+                    foreach ($column['blocks'] as $b => $block) {
+                        $data = $block['data'];
+                        if (isset($data['legacyContent'])) {
+                            $data['content'] = $data['legacyContent'];
+                            unset($data['legacyContent']);
+                        }
+                        $payload['columns'][$c]['blocks'][$b]['data'] = $data;
+                    }
+                }
+
+                return $payload;
+            }
+        };
+
+        $controller = $this->makeController($this->makeEm([$area, $template]), upgrader: $upgrader);
+
+        $response = $controller->insert(1, 7, $this->makeJsonRequest());
+
+        $this->assertSame(Response::HTTP_OK, $response->getStatusCode());
+        $inserted = $this->persisted[0];
+        $block = $inserted->getColumns()->first()->getBlocks()->first();
+        $this->assertSame(['content' => 'hello'], $block->getDraftData(), 'the upgraded payload was instantiated');
+        $this->assertSame(
+            ['legacyContent' => 'hello'],
+            $template->getPayload()['columns'][0]['blocks'][0]['data'],
+            'the stored row is untouched — a permanent rewrite is a migration',
+        );
+    }
+
+    public function testInsertRejectsATemplateWhoseBlocksAreAllGoneWith422(): void
+    {
+        $area = $this->makeArea(1);
+        $template = $this->makeTemplate(7, $this->payloadWith([
+            ['type' => 'ghost', 'data' => []],
+        ]), ['ghost']);
 
         $controller = $this->makeController($this->makeEm([$area, $template]));
 
@@ -186,7 +283,7 @@ final class SectionTemplateControllerTest extends ControllerTestCase
         $payload = json_decode((string) $response->getContent(), true);
         $this->assertSame(
             [['blockType' => 'fake', 'unknownKeys' => ['legacy']]],
-            $payload['warnings'],
+            $payload['unknownFields'],
         );
         $this->assertCount(1, $this->persisted);
     }
@@ -262,6 +359,24 @@ final class SectionTemplateControllerTest extends ControllerTestCase
     }
 
     // ---------- list (guards only) ----------
+
+    public function testInsertRejectsAnUnreadableEnvelopeWith422(): void
+    {
+        $area = $this->makeArea(1);
+        $payload = $this->payloadWith([['type' => 'fake', 'data' => []]]);
+        $payload['format'] = 'content-blocks/section-v99';
+        $template = $this->makeTemplate(7, $payload, ['fake']);
+
+        $controller = $this->makeController($this->makeEm([$area, $template]));
+
+        $response = $controller->insert(1, 7, $this->makeJsonRequest());
+
+        $this->assertSame(Response::HTTP_UNPROCESSABLE_ENTITY, $response->getStatusCode());
+        $body = json_decode((string) $response->getContent(), true);
+        $this->assertSame('unsupported_template_format', $body['error']);
+        $this->assertSame('content-blocks/section-v99', $body['found']);
+        $this->assertCount(0, $this->persisted);
+    }
 
     public function testListReturns404ForUnknownArea(): void
     {

@@ -2,45 +2,41 @@
 
 declare(strict_types=1);
 
-namespace ContentBlocks\Service;
+namespace ContentBlocks\Transfer;
 
 use ContentBlocks\Asset\AssetResolverInterface;
+use ContentBlocks\Block\BlockDataKeys;
+use ContentBlocks\Block\BlockRestoreTally;
+use ContentBlocks\BlockType\BlockTypeRegistry;
 use ContentBlocks\Entity\Block;
 use ContentBlocks\Entity\Column;
 use ContentBlocks\Entity\ContentArea;
 use ContentBlocks\Entity\Section;
+use ContentBlocks\Versioning\EnvelopeUpgradeChain;
 
 /**
- * Hydrates a JSON payload (as produced by ContentAreaExporter) into draft
- * sections on the target ContentArea.
- *
- * Replace semantics, mirroring the "Insert content" / replace-with flow:
- * existing sections are soft-deleted (committed at next Publish) and the
- * imported sections are added as never-published drafts. The caller is
- * responsible for flushing the EntityManager.
- *
- * Asset binaries are re-uploaded through AssetResolverInterface and the
- * `asset://{hash}` tokens inside block data / section settings are
- * rewritten in place to point at the new public paths.
+ * Default {@see ContentAreaImporterInterface} — see it for the contract.
+ * Asset binaries are re-stored through {@see AssetResolverInterface}.
  */
-final class ContentAreaImporter
+final class ContentAreaImporter implements ContentAreaImporterInterface
 {
     /** Token prefix produced by the exporter for embedded assets. */
     private const ASSET_TOKEN_PREFIX = 'asset://';
 
     public function __construct(
         private readonly AssetResolverInterface $assetResolver,
+        private readonly BlockTypeRegistry $registry,
+        private readonly BlockDataKeys $dataKeys,
+        private readonly EnvelopeUpgradeChain $envelopes = new EnvelopeUpgradeChain(),
     ) {
     }
 
     /**
      * @param array<string, mixed> $payload
-     *
-     * @return int Number of imported sections
      */
-    public function import(ContentArea $target, array $payload): int
+    public function import(ContentArea $target, array $payload): ImportResult
     {
-        $this->assertFormat($payload);
+        $payload = $this->normalizeEnvelope($payload);
 
         $assetMap = $this->materializeAssets($payload['assets'] ?? []);
 
@@ -56,32 +52,49 @@ final class ContentAreaImporter
         }
 
         $count = 0;
+        $tally = new BlockRestoreTally();
         foreach (array_values($sectionsRaw) as $i => $sectionRaw) {
             if (!is_array($sectionRaw)) {
                 continue;
             }
-            $section = $this->buildSection($sectionRaw, $assetMap);
+            $section = $this->buildSection($sectionRaw, $assetMap, $tally);
             $section->setPreviewPosition($i);
             $target->addSection($section);
             ++$count;
         }
 
-        return $count;
+        return new ImportResult(
+            $count,
+            $tally->skippedCount(),
+            $tally->skippedTypes(),
+            $tally->unknownFields(),
+        );
     }
 
     /**
+     * An envelope from an older structure is migrated forward when this package
+     * ships a step for it, and refused otherwise. The target is read from the
+     * *interface* constant: a host that swaps the exporter must not leave the
+     * importer checking the shipped class.
+     *
      * @param array<string, mixed> $payload
+     *
+     * @return array<string, mixed>
      */
-    private function assertFormat(array $payload): void
+    private function normalizeEnvelope(array $payload): array
     {
+        $target = ContentAreaExporterInterface::FORMAT;
         $format = $payload['format'] ?? null;
-        if ($format !== ContentAreaExporter::FORMAT) {
+
+        if (!is_string($format) || !$this->envelopes->supports($format, $target)) {
             throw new \InvalidArgumentException(sprintf(
                 'Unsupported format: %s (expected %s).',
                 is_scalar($format) ? (string) $format : '(invalid)',
-                ContentAreaExporter::FORMAT,
+                $target,
             ));
         }
+
+        return $this->envelopes->upgrade($payload, $format, $target);
     }
 
     /**
@@ -121,10 +134,10 @@ final class ContentAreaImporter
     }
 
     /**
-     * @param array<string, mixed> $raw
-     * @param array<string, string> $assetMap
+     * @param array<string, mixed>                                      $raw
+     * @param array<string, string>                                     $assetMap
      */
-    private function buildSection(array $raw, array $assetMap): Section
+    private function buildSection(array $raw, array $assetMap, BlockRestoreTally $tally): Section
     {
         $section = new Section();
         if (isset($raw['layout']) && is_string($raw['layout'])) {
@@ -142,7 +155,7 @@ final class ContentAreaImporter
                 if (!is_array($colRaw)) {
                     continue;
                 }
-                $col = $this->buildColumn($colRaw, $assetMap);
+                $col = $this->buildColumn($colRaw, $assetMap, $tally);
                 $col->setPreviewPosition($i);
                 $section->addColumn($col);
             }
@@ -152,10 +165,10 @@ final class ContentAreaImporter
     }
 
     /**
-     * @param array<string, mixed> $raw
-     * @param array<string, string> $assetMap
+     * @param array<string, mixed>                                      $raw
+     * @param array<string, string>                                     $assetMap
      */
-    private function buildColumn(array $raw, array $assetMap): Column
+    private function buildColumn(array $raw, array $assetMap, BlockRestoreTally $tally): Column
     {
         $col = new Column();
         if (isset($raw['preset']) && is_string($raw['preset'])) {
@@ -164,12 +177,18 @@ final class ContentAreaImporter
 
         $blocks = $raw['blocks'] ?? null;
         if (is_array($blocks)) {
-            foreach (array_values($blocks) as $i => $blockRaw) {
+            // Positions come from the *kept* blocks so a skipped one doesn't
+            // leave a hole in the sequence.
+            $position = 0;
+            foreach (array_values($blocks) as $blockRaw) {
                 if (!is_array($blockRaw)) {
                     continue;
                 }
-                $block = $this->buildBlock($blockRaw, $assetMap);
-                $block->setPreviewPosition($i);
+                $block = $this->buildBlock($blockRaw, $assetMap, $tally);
+                if ($block === null) {
+                    continue;
+                }
+                $block->setPreviewPosition($position++);
                 $col->addBlock($block);
             }
         }
@@ -178,19 +197,38 @@ final class ContentAreaImporter
     }
 
     /**
-     * @param array<string, mixed> $raw
-     * @param array<string, string> $assetMap
+     * @param array<string, mixed>                                      $raw
+     * @param array<string, string>                                     $assetMap
+     *
+     * @return Block|null null when the block's type is not registered here
      */
-    private function buildBlock(array $raw, array $assetMap): Block
+    private function buildBlock(array $raw, array $assetMap, BlockRestoreTally $tally): ?Block
     {
-        $block = new Block();
-        if (isset($raw['type']) && is_string($raw['type'])) {
-            $block->setType($raw['type']);
+        $type = $raw['type'] ?? null;
+        if (is_string($type) && !$this->registry->has($type)) {
+            // Skipped: not refused (the payload comes from another install, so
+            // a type this app lacks is expected) and not imported either (it
+            // would leave an inert block). See ImportResult.
+            $tally->skip($type);
+
+            return null;
         }
+
+        $block = new Block();
+        if (is_string($type)) {
+            $block->setType($type);
+        }
+
         $data = $raw['data'] ?? null;
         if (is_array($data)) {
+            if (is_string($type)) {
+                $tally->noteUnknownKeys($type, $this->dataKeys->unknownIn($type, $data));
+            }
+            // Kept verbatim, unknown keys included — those warn, never drop.
             $block->setDraftData($this->rewriteAssets($data, $assetMap));
         }
+
+        $tally->keep();
 
         return $block;
     }

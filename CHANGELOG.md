@@ -7,6 +7,199 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING — styling viewport keys `d`/`t`/`m` → `desktop`/`tablet`/`mobile`.**
+  The responsive styling sub-tree (`styling.padding`/`margin`/`gap`) now spells out
+  the viewport keys in stored data (section `draft_settings`/`published_settings`
+  and block `draft_data`/`published_data`). The emitted CSS custom-property names
+  stay terse (`--cb-s-pad-d-t`, `--cb-gap-d`) — the decorators map long→short — so
+  `styling.css` and any host CSS override are unaffected. Migrate existing rows with
+  the reference migration `Version20260715130000` (both sandboxes; reversible).
+- **BREAKING — config key `upload.dir` → `upload.directory`.** The last
+  abbreviation in the config tree, next to `public_prefix`, `max_size` and
+  `allowed_mime_types` spelled out in the same block. Renamed now because YAML
+  keys freeze at 1.0. A stale `dir:` fails at container build with
+  `Unrecognized option "dir" under "content_blocks.upload"` — there is no silent
+  fallback.
+- **BREAKING — config key `styles` → `section_styles`.** The section-style-presets
+  config key now matches the emitted parameter (`content_blocks.section_styles`);
+  host YAML under `content_blocks.styles:` must be renamed to `section_styles:`.
+- **BREAKING — `ContentBlocks\Service\` is gone.** The six services that lived in
+  that catch-all namespace moved next to the rest of their domain, where every
+  other extension point already sat: `ContentAreaPublisher` → `ContentBlocks\Publishing\`,
+  `SectionCloner` → `ContentBlocks\Section\`, `ContentAreaExporter`/`ContentAreaImporter`
+  → `ContentBlocks\Transfer\`, `SectionTemplateSerializer`/`SectionTemplateInstantiator`
+  → `ContentBlocks\SectionTemplate\` (joining `InstantiationResult`,
+  `IncompatibleTemplateException` and `SectionTemplateManagerInterface`, which were
+  already there). Class names, methods and behaviour are unchanged — a
+  find-and-replace of `ContentBlocks\Service\` suffices, and a missed one fails
+  loudly at container build. The matching `…Interface` classes follow the same
+  mapping.
+- **BREAKING — `ContentAreaImporterInterface::import()` returns an `ImportResult`,
+  `SectionTemplateSerializerInterface::serialize()` a `SectionTemplateSnapshot`.**
+  Both used to return bare arrays/ints. `$snapshot->payload` / `->blockTypes`
+  replace `$serialized['payload']` / `['blockTypes']`; `$result->sectionCount`
+  replaces the returned `int`. Only relevant if you call these services directly.
+- **Both restore flows (area import, section-template insert) are now optimistic:
+  they bring in everything this installation can use and report the rest.**
+  A block whose type is not registered here is **skipped** — importing it would
+  hand the editor an inert placeholder (no view template, no edit form), and
+  nothing is lost since the JSON file / stored payload remains the archive:
+  install the block type and re-import. A stored key no registered type declares
+  is **kept** and merely reported — the block itself is usable, and the key may
+  well be a field about to be added. In short, "compatible" is judged per block,
+  not per key. Previously the import accepted any block type silently (producing
+  unrenderable blocks) while the template insert refused the whole operation.
+  The only hard stop left on content is a template that had blocks and kept none.
+  Both flows report through their result object (`ImportResult`,
+  `InstantiationResult`), which now share their vocabulary: `skippedBlockCount`,
+  `skippedBlockTypes`, `unknownFields`.
+- **The section-template picker warns instead of blocking when a template is
+  partially usable.** A row is disabled only when nothing would come in (an
+  unreadable payload envelope, or every one of its block types gone); otherwise
+  it stays clickable and its tooltip spells out how many blocks will be skipped
+  and of which types. The list response fields changed accordingly:
+  `compatible`/`missingTypes` → `insertable`/`skippedTypes`.
+- **Section-template payloads are validated against the envelope format they
+  declare.** `SectionTemplateSerializer::FORMAT` was written into every stored
+  payload since the feature shipped but never read back, so a payload written
+  under an older structure would have been replayed blind. Such a template is now
+  shown as unavailable in the library picker, and the instantiator refuses it with
+  a dedicated `UnsupportedTemplateFormatException`
+  — separate from `IncompatibleTemplateException`, whose `getMissingTypes()`
+  would be empty and read as "nothing is missing". The format versions the
+  payload *structure*, which the core owns; it says nothing about the shape of
+  the block data inside, which belongs to the block types.
+- **`section_styles[].settings` is now a typed config node** (was a free-form
+  `variableNode`). Preset YAML is validated and self-documenting; the shape mirrors
+  `SectionSettingsType`/`StylingType`. Unknown keys and bad viewport/align/unit
+  values now fail at container build instead of silently persisting. Host presets
+  using the old `d`/`t`/`m` viewport keys must be updated to `desktop`/`tablet`/`mobile`.
+
+### Added
+
+- **Host-owned content versioning (`content_blocks.content_version`).** The shape
+  of stored block data is decided by the block types — the host's and the kit's —
+  not by this package, so the schema generation of that content is now a host
+  config value (int, default `1`). It is stamped onto `cb_content_area.content_version`
+  as content is written (by the same onFlush listener that touches `updatedAt`),
+  and onto `cb_section_template.content_version` when a snapshot is saved, so a
+  host migration can target what predates a change of its own making:
+  `WHERE content_version < N OR content_version IS NULL`.
+  Read the area column as *"last written under version N"*, not *"conforms to
+  version N"*: editing one block re-stamps the whole area while its other blocks
+  keep whatever shape they had, so migrate before letting editors work on a new
+  version. A section template carries no such caveat — a snapshot is frozen.
+  `NULL` means "predates versioning" and is deliberately distinct from `0`.
+  Export payloads carry the emitting app's `contentVersion` for information only;
+  import ignores it and stamps the target with the local version, since a version
+  number means something only inside the installation that issued it. Reference
+  migration `Version20260729120000` in both sandboxes.
+- **`ContentVersionUpgraderInterface` — what to do with content from an older
+  schema generation.** Section templates are the one place where a stored version
+  is comparable (the number came from this same installation), so that is where
+  the seam applies: `supports(?int $stored, int $current)` is called once per row
+  when listing the library, so the picker greys out what the host refuses instead
+  of letting an editor click into an error, and `upgrade(array $payload, …)` runs
+  on the way in. Upgrading is **transient** — what the host returns is
+  instantiated, the stored row is untouched; a permanent rewrite is a migration.
+  The shipped `DenyOnMismatchUpgrader` refuses a *known* mismatch and accepts
+  `null`: every row written before versioning carries null, and refusing those
+  would make a host's whole library unusable the day they upgrade. Import does
+  not consult the seam — an imported payload's version belongs to the app that
+  exported it; hosts controlling both ends can decorate
+  `ContentAreaImporterInterface` instead.
+- **`EnvelopeUpgraderInterface` + `EnvelopeUpgradeChain` — the package's own side
+  of versioning.** A stored payload has two schemas with two owners: the content
+  inside it is shaped by the block types (host territory, see above), the envelope
+  around it belongs to this package. When a release changes that structure it can
+  now ship an upgrade step alongside, and the chain walks a payload from the
+  format it declares to the one the code reads — so old section templates and old
+  export files keep working across a format bump. Both restore flows go through
+  it, and the section-template picker treats "readable" as "reachable through the
+  chain" rather than "exactly today's format".
+  **The chain ships empty**: only one format of each kind exists so far, so every
+  call is a no-op today. It exists now because the alternative — a bump condemning
+  every stored payload — is what makes a bump unthinkable in the first place.
+  Steps are autoconfigured (`content_blocks.envelope_upgrader`), so adding one is
+  a class and nothing else; a test asserts exactly that.
+- **`ContentVersionUpgraderInterface` — what to do with content from an older
+  schema generation.** Section templates are the one place where a stored version
+  is comparable (the number came from this same installation), so that is where
+  the seam applies: `supports(?int $stored, int $current)` is called once per row
+  when listing the library, so the picker greys out what the host refuses instead
+  of letting an editor click into an error, and `upgrade(array $payload, …)` runs
+  on the way in. Upgrading is **transient** — what the host returns is
+  instantiated, the stored row is untouched; a permanent rewrite is a migration.
+  The shipped `DenyOnMismatchUpgrader` refuses a *known* mismatch and accepts
+  `null`: every row written before versioning carries null, and refusing those
+  would make a host's whole library unusable the day they upgrade. Import does
+  not consult the seam — an imported payload's version belongs to the app that
+  exported it; hosts controlling both ends can decorate
+  `ContentAreaImporterInterface` instead.
+- **Per-block form extension API.** Hosts can now add fields to the edit form of
+  one (or several) block types without subclassing. Implement
+  `ContentBlocks\Form\Extension\BlockFormExtensionInterface` (`buildForm($builder, $data, $blockType)`)
+  and tag it with `#[AsBlockFormExtension('button')]` (one type),
+  `#[AsBlockFormExtension(['button', 'card'])]` (several) or `#[AsBlockFormExtension]`
+  (global, every block). `BlockFormType` invokes every matching extension after the
+  block's own `buildForm()`, in `priority` order. Keyed by block type **id** (string,
+  not class) so it survives subclassing and matches the config keys. This replaces the
+  `FormTypeExtension` + `instanceof`-guard workaround, which could not be scoped to one
+  block. The added field's value round-trips into `Block.data` like any other (block
+  data is not pruned); render it via a host block-template override. Autoconfigured, no
+  wiring. The seam is not add-only: the builder is the block's own, so an extension may
+  also `remove()` a field (its stored value is frozen, not deleted, and a POST still
+  carrying it is dropped) or reorder fields by re-adding their child builders. See the
+  [Add a field to a block](https://klehm.github.io/content-blocks-project/guide/recipes/add-block-field) recipe.
+- **`BlockRendererInterface` — rendering override seam (road to v1.0).** The
+  central `BlockRenderer` now implements a `BlockRendererInterface` (`render`,
+  `resolveMode`, `renderBlock`, `renderSection`, and the `QUERY_PARAM` constant),
+  aliased to the shipped implementation. Consumers (the Twig extension and the
+  render controllers) type-hint the interface, so a host can now customize
+  rendering — wrap output, add caching, swap the preview-mode heuristic — by
+  decorating it (`#[AsDecorator(BlockRendererInterface::class)]`) or re-aliasing.
+  Backward-compatible: the concrete `BlockRenderer` service id still resolves.
+- **Interfaces for the six remaining core services (road to v1.0).** Following
+  `BlockRendererInterface`, the services that carry the rest of the builder's core
+  behaviour are now each an interface aliased to the shipped implementation, with
+  every consumer type-hinting the interface: `ContentAreaPublisherInterface`,
+  `SectionClonerInterface`, `ContentAreaExporterInterface`,
+  `ContentAreaImporterInterface`, `SectionTemplateSerializerInterface` and
+  `SectionTemplateInstantiatorInterface`. Hosts can now replace or decorate any of
+  them (`#[AsDecorator(...)]`) instead of being stuck with a `final` class injected
+  by concrete type. The payload-format constants moved onto the interfaces
+  (`ContentAreaExporterInterface::FORMAT`, `SectionTemplateSerializerInterface::FORMAT`)
+  and the importer now validates against the interface, so swapping the exporter no
+  longer leaves the importer checking the shipped class. Backward-compatible: the
+  concrete service ids still resolve, and `ContentAreaExporter::FORMAT` still reads
+  the same value through inheritance.
+
+### Fixed
+
+- **The bundle could not boot on a Webpack Encore host.** `prependExtension()`
+  registered the package's `assets/` directory under `framework.asset_mapper.paths`
+  unconditionally. That node is declared with `canBeEnabled()`, whose normalization
+  turns any non-empty array into `enabled: true` — so the prepend did not merely
+  describe a path, it *enabled* a component this package has never required.
+  Without `symfony/asset-mapper` installed, `FrameworkExtension` then threw
+  `AssetMapper support cannot be enabled as the AssetMapper component is not
+  installed`, at container build, before anything else could report a cause. The
+  prepend is now guarded by `class_exists()`. Encore hosts read the same
+  controllers out of `assets/package.json` through `@symfony/stimulus-bridge`; see
+  [Installation → With Webpack Encore](https://klehm.github.io/content-blocks-project/guide/installation#with-webpack-encore).
+- **Section-template insert warned about fields that were perfectly valid.**
+  `SectionTemplateInstantiator` decided which stored keys a block could hold from
+  `getDefaultData()` alone, so it flagged `styling` (added to every block form by
+  `BlockFormType`, deliberately absent from `getDefaultData()`) and every field
+  contributed by a host `BlockFormExtension`. Known keys are now the union of
+  `getDefaultData()` and the children of the block's built edit form.
+- **…and the warning never reached anyone anyway.** The builder wrote the message
+  into the template picker's status line and then closed the picker, blanking the
+  only element carrying it. The picker now stays open when there is something to
+  report.
+
 ## [0.1.0-beta.7] - 2026-07-10
 
 ### Added
