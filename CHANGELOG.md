@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **An expired session no longer passes for a save.** A firewall's login
+  redirect answered a builder call with a `200` login page, which the section
+  form reported as saved (nothing was stored) and which made the preview reload
+  onto an unrelated page. Such a redirect is now a `401`
+  (`SessionExpiredResponseListener`, header `X-Content-Blocks-Session: expired`),
+  the builder also recognises a followed redirect, and a *Session expired*
+  banner replaces the save error. The preview is not reloaded meanwhile, and the
+  unsaved edit is sent again once the session is back.
+- **The builder checks the session when the editor returns.** The first
+  interaction after a minute of inactivity asks `GET /area/{id}/state`, which
+  now also returns the session's current `csrfToken`. The banner shows before
+  an edit is lost, and a renewed session hands over its new CSRF token.
+
+## [1.0.0-RC13] - 2026-09-17
+
 ### Added
 
 - **Display per viewport.** *Display* gets the desktop / tablet / mobile switch:
